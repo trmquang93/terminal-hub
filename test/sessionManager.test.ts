@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -287,5 +287,70 @@ describe('SessionManager — plain commands', () => {
     await m.remove(id);
     expect(m.get(id)).toBeUndefined();
     expect(() => readFileSync(join(base, 'sessions', id, 'meta.json'))).toThrow();
+  });
+});
+
+describe('SessionManager — archive and batch delete', () => {
+  it('new sessions are not archived; setArchived persists, emits changed and survives a reload', async () => {
+    const m = manager();
+    const { id } = m.start({ cwd: work, command: 'sh', args: ['-c', 'true'] });
+    expect(m.get(id)?.archived).toBe(false);
+    await exited(m, id);
+
+    const changes: SessionInfo[] = [];
+    m.onChanged((session) => changes.push(session));
+    expect(m.setArchived(id, true)).toMatchObject({ id, archived: true });
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ id, archived: true });
+    expect(readMeta(id).archived).toBe(true);
+    expect(manager().get(id)?.archived).toBe(true);
+
+    expect(m.setArchived(id, false).archived).toBe(false);
+    expect(readMeta(id).archived).toBe(false);
+  });
+
+  it('refuses to archive a running session (400) but unarchive is always allowed', () => {
+    const m = manager();
+    const { id } = m.start({ cwd: work, command: 'sleep', args: ['60'] });
+    expect(() => m.setArchived(id, true)).toThrow(/running/);
+    expect(m.get(id)?.archived).toBe(false);
+    expect(readMeta(id).archived).toBe(false);
+    expect(m.setArchived(id, false).archived).toBe(false);
+    expect(() => m.setArchived('99999999-9999-4999-8999-999999999999', true)).toThrow(/no such session/);
+  });
+
+  it('resuming an archived session brings it back to the main list', async () => {
+    const m = manager();
+    const { id } = m.start({ cwd: work, command: 'sh', args: ['-c', 'true'] });
+    await exited(m, id);
+    m.setArchived(id, true);
+    m.resume(id);
+    expect(m.get(id)?.archived).toBe(false);
+    expect(readMeta(id).archived).toBe(false);
+    await exited(m, id);
+  });
+
+  it('removeMany kills running sessions, deletes every folder and emits removed once per id', async () => {
+    const m = manager();
+    const a = m.start({ cwd: work, command: 'sh', args: ['-c', 'true'] });
+    const b = m.start({ cwd: work, command: 'sleep', args: ['60'] });
+    const keep = m.start({ cwd: work, command: 'sleep', args: ['60'] });
+    await exited(m, a.id);
+    const removed: string[] = [];
+    m.onRemoved((id) => removed.push(id));
+
+    await m.removeMany([a.id, b.id, a.id]);
+    expect(removed.sort()).toEqual([a.id, b.id].sort());
+    expect(m.list().map((s) => s.id)).toEqual([keep.id]);
+    for (const id of [a.id, b.id]) expect(existsSync(join(base, 'sessions', id))).toBe(false);
+    expect(existsSync(join(base, 'sessions', keep.id, 'meta.json'))).toBe(true);
+  });
+
+  it('removeMany with an unknown id deletes nothing', async () => {
+    const m = manager();
+    const { id } = m.start({ cwd: work, command: 'sleep', args: ['60'] });
+    await expect(m.removeMany([id, '99999999-9999-4999-8999-999999999999'])).rejects.toThrow(/no such session/);
+    expect(m.get(id)?.running).toBe(true);
+    expect(existsSync(join(base, 'sessions', id))).toBe(true);
   });
 });

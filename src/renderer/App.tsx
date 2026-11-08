@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HubDefaults, SessionInfo, StartSessionOptions, UpdaterStatus } from '../shared/types';
 import { formatTime, shortenPath } from './format';
+import { groupSessions } from './grouping';
 import { NewSessionDialog } from './NewSessionDialog';
 import { TerminalView } from './TerminalView';
 
@@ -17,7 +18,17 @@ function Badge({ session }: { session: SessionInfo }) {
   return <span className={failed ? 'badge failed' : 'badge exited'}>exited · {detail}</span>;
 }
 
-function SessionRow({ session, home, selected, onSelect, onDelete }: { session: SessionInfo; home: string; selected: boolean; onSelect: () => void; onDelete: () => void }) {
+interface RowActions {
+  home: string;
+  selectedId: string | null;
+  selectMode: boolean;
+  checked: Set<string>;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+  onArchive: (id: string, archived: boolean) => void;
+}
+
+function SessionRow({ session, selected, selectMode, checked, onSelect, onDelete, onArchive }: { session: SessionInfo; selected: boolean; selectMode: boolean; checked: boolean; onSelect: () => void; onDelete: () => void; onArchive: (archived: boolean) => void }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.title);
   const commit = (): void => {
@@ -25,8 +36,9 @@ function SessionRow({ session, home, selected, onSelect, onDelete }: { session: 
     if (draft.trim() && draft.trim() !== session.title) void window.hub.renameSession(session.id, draft.trim());
   };
   return (
-    <li className={selected ? 'session selected' : 'session'} onClick={onSelect}>
+    <li className={`session${selected && !selectMode ? ' selected' : ''}${checked ? ' checked' : ''}${session.archived ? ' archived' : ''}`} onClick={onSelect}>
       <div className="session-head">
+        {selectMode && <input className="check" type="checkbox" checked={checked} onChange={onSelect} onClick={(event) => event.stopPropagation()} />}
         {editing ? (
           <input
             className="rename"
@@ -52,12 +64,16 @@ function SessionRow({ session, home, selected, onSelect, onDelete }: { session: 
             {session.title}
           </span>
         )}
-        <button className="icon" title="Delete session" onClick={(event) => (event.stopPropagation(), onDelete())}>
-          ×
-        </button>
-      </div>
-      <div className="cwd" title={session.cwd}>
-        {shortenPath(session.cwd, home)}
+        {!selectMode && !session.running && (
+          <button className="icon text" title={session.archived ? 'Unarchive session' : 'Archive session'} onClick={(event) => (event.stopPropagation(), onArchive(!session.archived))}>
+            {session.archived ? 'Unarchive' : 'Archive'}
+          </button>
+        )}
+        {!selectMode && (
+          <button className="icon" title="Delete session" onClick={(event) => (event.stopPropagation(), onDelete())}>
+            ×
+          </button>
+        )}
       </div>
       <div className="meta">
         <Badge session={session} />
@@ -69,6 +85,35 @@ function SessionRow({ session, home, selected, onSelect, onDelete }: { session: 
         {session.endedAt && <> · ended {formatTime(session.endedAt)}</>}
       </div>
     </li>
+  );
+}
+
+function SessionGroups({ sessions, actions }: { sessions: SessionInfo[]; actions: RowActions }) {
+  return (
+    <>
+      {groupSessions(sessions).map((group) => (
+        <li key={group.cwd} className="group">
+          <div className="group-head" title={group.cwd}>
+            <strong>{group.name}</strong>
+            <span className="cwd">{shortenPath(group.cwd, actions.home)}</span>
+          </div>
+          <ul className="group-sessions">
+            {group.sessions.map((session) => (
+              <SessionRow
+                key={session.id}
+                session={session}
+                selected={session.id === actions.selectedId}
+                selectMode={actions.selectMode}
+                checked={actions.checked.has(session.id)}
+                onSelect={() => actions.onSelect(session.id)}
+                onDelete={() => actions.onDelete(session.id)}
+                onArchive={(archived) => actions.onArchive(session.id, archived)}
+              />
+            ))}
+          </ul>
+        </li>
+      ))}
+    </>
   );
 }
 
@@ -154,6 +199,9 @@ export function App() {
   const [dialog, setDialog] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [update, setUpdate] = useState<UpdaterStatus | null>(null);
+  const [selectMode, setSelectMode] = useState(false);
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [archivedOpen, setArchivedOpen] = useState(false);
   const announced = useRef(new Map<string, string>());
 
   const refreshDefaults = useCallback(() => window.hub.defaults().then(setDefaults), []);
@@ -180,6 +228,7 @@ export function App() {
     const offSelect = window.hub.onSelect(setSelectedId);
     const offRemoved = window.hub.onSessionRemoved((id) => {
       setSessions((list) => list.filter((item) => item.id !== id));
+      setChecked((current) => (current.has(id) ? new Set([...current].filter((item) => item !== id)) : current));
       setSelectedId((current) => (current === id ? null : current));
     });
     const offMenu = window.hub.onMenu((action) => {
@@ -194,8 +243,34 @@ export function App() {
     };
   }, [refreshDefaults]);
 
-  const ordered = useMemo(() => [...sessions].sort((a, b) => b.startedAt.localeCompare(a.startedAt)), [sessions]);
+  const unarchived = useMemo(() => sessions.filter((session) => !session.archived), [sessions]);
+  const archived = useMemo(() => sessions.filter((session) => session.archived), [sessions]);
   const selected = sessions.find((session) => session.id === selectedId) ?? null;
+
+  function endSelectMode(): void {
+    setSelectMode(false);
+    setChecked(new Set());
+  }
+
+  function toggleChecked(id: string): void {
+    setChecked((current) => new Set(current.has(id) ? [...current].filter((item) => item !== id) : [...current, id]));
+  }
+
+  async function deleteChecked(): Promise<void> {
+    const ids = [...checked];
+    endSelectMode();
+    await window.hub.deleteSessions(ids);
+  }
+
+  const actions: RowActions = {
+    home: defaults?.home ?? '',
+    selectedId,
+    selectMode,
+    checked,
+    onSelect: (id) => (selectMode ? toggleChecked(id) : setSelectedId(id)),
+    onDelete: (id) => void window.hub.deleteSession(id),
+    onArchive: (id, value) => void window.hub.archiveSession(id, value).catch((error: unknown) => alert(String(error))),
+  };
 
   async function create(options: StartSessionOptions): Promise<void> {
     const id = await window.hub.createSession(options);
@@ -213,18 +288,37 @@ export function App() {
           </button>
           {update && <UpdateChip status={update} />}
         </div>
+        <div className="select-bar">
+          {selectMode ? (
+            <>
+              <span className="count">{checked.size} selected</span>
+              <button className="danger" disabled={checked.size === 0} onClick={() => void deleteChecked()}>
+                Delete selected
+              </button>
+              <button onClick={endSelectMode}>Cancel</button>
+            </>
+          ) : (
+            <button disabled={sessions.length === 0} onClick={() => setSelectMode(true)}>
+              Select
+            </button>
+          )}
+        </div>
         <ul className="sessions">
-          {ordered.map((session) => (
-            <SessionRow
-              key={session.id}
-              session={session}
-              home={defaults?.home ?? ''}
-              selected={session.id === selectedId}
-              onSelect={() => setSelectedId(session.id)}
-              onDelete={() => void window.hub.deleteSession(session.id)}
-            />
-          ))}
-          {ordered.length === 0 && <li className="empty">No sessions yet.</li>}
+          <SessionGroups sessions={unarchived} actions={actions} />
+          {sessions.length === 0 && <li className="empty">No sessions yet.</li>}
+          {sessions.length > 0 && unarchived.length === 0 && <li className="empty">No sessions outside the archive.</li>}
+          {archived.length > 0 && (
+            <li className="archived-section">
+              <button className="archived-toggle" aria-expanded={archivedOpen} onClick={() => setArchivedOpen((open) => !open)}>
+                {archivedOpen ? '▾' : '▸'} Archived ({archived.length})
+              </button>
+              {archivedOpen && (
+                <ul className="group-sessions">
+                  <SessionGroups sessions={archived} actions={actions} />
+                </ul>
+              )}
+            </li>
+          )}
         </ul>
         <div className="sidebar-bottom">
           <button className="danger" disabled={sessions.length === 0} onClick={() => void window.hub.deleteAllHistory()}>

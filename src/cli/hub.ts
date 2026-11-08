@@ -11,11 +11,13 @@ const startHint = typeof HUB_PACKAGED !== 'undefined' && HUB_PACKAGED ? "open -a
 
 const USAGE = `usage:
   hub run [--cwd DIR] [--title T] [--unattended] [-q] -- CMD ARGS…   start a session, follow it, exit with its exit code
-  hub ls                                              list sessions (state, resumable)
+  hub ls                                              list sessions (state, resumable, archived)
   hub text <id> [--follow]                            plain-text output (ANSI stripped)
   hub send <id> "text" [--no-enter]                   type into a session (Enter appended by default)
   hub stop <id>                                       SIGTERM, SIGKILL after 3 s
   hub resume <id> [--follow]                          resume (Claude Code) or restart (other commands)
+  hub archive <id>                                    move a finished session to the Archived list (refused while it runs)
+  hub unarchive <id>                                  move it back
   hub rm <id>                                         delete the session and its files
   hub notify-test                                     send one synthetic "attention" event to the endpoint in notify.json and print the HTTP result
   hub wait <id> [--timeout S]                         block until it needs attention (exit 10, prints the question) or exits (its code); 124 on timeout
@@ -256,11 +258,12 @@ async function main(argv: string[]): Promise<number> {
       return run(api, args);
     case 'ls': {
       const sessions = (await json<SessionInfo[]>(api, '/sessions')).sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-      console.log(['ID', 'STATE', 'RESUMABLE', 'EXIT', 'STARTED', 'CWD', 'TITLE'].map((h, i) => pad(h, [36, 12, 10, 5, 20, 30, 0][i] ?? 0)).join(' '));
+      const widths = [36, 12, 10, 9, 5, 20, 30, 0];
+      console.log(['ID', 'STATE', 'RESUMABLE', 'ARCHIVED', 'EXIT', 'STARTED', 'CWD', 'TITLE'].map((h, i) => pad(h, widths[i] ?? 0)).join(' '));
       for (const s of sessions) {
         const exit = s.running ? '-' : String(s.exitCode ?? (s.signal === null ? '?' : `sig${s.signal}`));
-        const cells = [s.id, s.running ? 'running' : s.state, s.resumable ? (s.claude ? 'yes' : 'restart') : 'no', exit, s.startedAt.slice(0, 19), s.cwd, s.title];
-        console.log(cells.map((cell, i) => pad(cell, [36, 12, 10, 5, 20, 30, 0][i] ?? 0)).join(' '));
+        const cells = [s.id, s.running ? 'running' : s.state, s.resumable ? (s.claude ? 'yes' : 'restart') : 'no', s.archived ? 'ARCHIVED' : '-', exit, s.startedAt.slice(0, 19), s.cwd, s.title];
+        console.log(cells.map((cell, i) => pad(cell, widths[i] ?? 0)).join(' '));
       }
       return 0;
     }
@@ -295,6 +298,12 @@ async function main(argv: string[]): Promise<number> {
       const body = typeof keys === 'string' ? { keys: keys.replaceAll('\\r', '\r').replaceAll('\\n', '\n').replaceAll('\\t', '\t').replaceAll('\\e', '\x1b') } : { text, submit: !bare && !flags.has('--no-submit') };
       const result = await json<{ sent: string }>(api, `/sessions/${id}/answer`, { method: 'POST', body });
       console.log(`sent ${JSON.stringify(result.sent)}`);
+      return 0;
+    }
+    case 'archive':
+    case 'unarchive': {
+      const id = await resolveId(api, args[0]);
+      await call(api, `/sessions/${id}/archive`, { method: 'POST', body: { archived: command === 'archive' } });
       return 0;
     }
     case 'stop':

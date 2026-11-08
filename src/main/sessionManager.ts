@@ -178,6 +178,7 @@ export class SessionManager implements SessionService {
       claude: plan?.claude ?? null,
       resumeCount: 0,
       autoAnswer: options.autoAnswer ?? (options.unattended ? SAFE_UNATTENDED_POLICY : null),
+      archived: false,
       startedAt: new Date().toISOString(),
       endedAt: null,
       exitCode: null,
@@ -219,7 +220,7 @@ export class SessionManager implements SessionService {
       }
     }
     const previous = { ...meta };
-    Object.assign(meta, { state: 'running', endedAt: null, exitCode: null, signal: null, resumeCount: meta.resumeCount + 1 });
+    Object.assign(meta, { state: 'running', endedAt: null, exitCode: null, signal: null, archived: false, resumeCount: meta.resumeCount + 1 });
     try {
       this.launch(meta, args);
     } catch (error) {
@@ -422,6 +423,15 @@ export class SessionManager implements SessionService {
     return this.info(meta);
   }
 
+  setArchived(id: string, archived: boolean): SessionInfo {
+    const meta = this.require(id);
+    if (archived && this.live.has(id)) throw new HubError(400, 'cannot archive a running session; stop it first');
+    meta.archived = archived;
+    this.store.writeMeta(meta);
+    this.emitChanged(meta);
+    return this.info(meta);
+  }
+
   private waitForExit(id: string, timeoutMs: number): Promise<void> {
     if (!this.live.has(id)) return Promise.resolve();
     return new Promise((resolve) => {
@@ -446,6 +456,13 @@ export class SessionManager implements SessionService {
     this.store.delete(id);
     this.sessions.delete(id);
     this.emitter.emit('removed', id);
+  }
+
+  /** Validates every id before deleting anything, then removes them together. */
+  async removeMany(ids: string[]): Promise<void> {
+    const unique = [...new Set(ids)];
+    unique.forEach((id) => this.require(id));
+    await Promise.all(unique.map((id) => this.remove(id)));
   }
 
   async removeAll(): Promise<void> {

@@ -206,6 +206,13 @@ export function createApiServer(options: ApiOptions): Server {
       return sendJson(res, 200, { ok: true, matched });
     }
 
+    if (url.pathname === '/sessions/delete' && method === 'POST') {
+      const { ids } = await readJson(req);
+      if (!Array.isArray(ids) || !ids.every((item) => typeof item === 'string')) throw new HubError(400, 'ids must be an array of strings');
+      await service.removeMany(ids);
+      return sendJson(res, 200, { ok: true, deleted: new Set(ids).size });
+    }
+
     if (url.pathname === '/sessions') {
       if (method === 'GET') return sendJson(res, 200, url.searchParams.get('attention') === '1' ? service.list().filter((item) => item.attention !== null) : service.list());
       if (method === 'POST') {
@@ -265,6 +272,11 @@ export function createApiServer(options: ApiOptions): Server {
       if (action === 'resume') {
         service.resume(id);
         return sendJson(res, 200, { id });
+      }
+      if (action === 'archive') {
+        const { archived } = await readJson(req);
+        if (typeof archived !== 'boolean') throw new HubError(400, 'archived must be a boolean');
+        return sendJson(res, 200, service.setArchived(id, archived));
       }
       if (action === 'title') {
         const { title } = await readJson(req);

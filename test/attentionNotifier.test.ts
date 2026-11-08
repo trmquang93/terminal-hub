@@ -23,6 +23,7 @@ function session(overrides: Partial<SessionInfo> = {}): SessionInfo {
     claude: null,
     resumeCount: 0,
     autoAnswer: null,
+    archived: false,
     startedAt: '2026-11-08T07:00:00.000Z',
     endedAt: null,
     exitCode: null,

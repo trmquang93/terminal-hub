@@ -82,12 +82,16 @@ function registerIpc(): void {
   ipcMain.handle('hub:resume', (_event, id: string) => void manager.resume(id));
   ipcMain.handle('hub:answer', (_event, id: string, request: AnswerRequest) => manager.answer(id, request));
   ipcMain.handle('hub:rename', (_event, id: string, title: string) => void manager.setTitle(id, title));
+  ipcMain.handle('hub:archive', (_event, id: string, archived: boolean) => void manager.setArchived(id, archived));
   ipcMain.handle('hub:delete', async (_event, id: string) => {
-    const session = manager.get(id);
-    if (!session) return false;
-    const ok = await confirm(`Delete “${session.title}”?`, 'The session folder and its output log are removed from disk. This cannot be undone.', 'Delete session');
-    if (ok) await manager.remove(id);
-    return ok;
+    if (!manager.get(id)) return false;
+    await manager.remove(id);
+    return true;
+  });
+  ipcMain.handle('hub:deleteMany', async (_event, ids: string[]) => {
+    const existing = ids.filter((id) => manager.get(id));
+    await manager.removeMany(existing);
+    return existing.length;
   });
   ipcMain.handle('hub:deleteAll', deleteAllHistory);
   ipcMain.handle('hub:getUpdate', () => updater?.getStatus() ?? { phase: 'idle', ahead: 0, message: 'auto-update off' });

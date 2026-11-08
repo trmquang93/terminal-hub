@@ -20,6 +20,7 @@ function meta(id: string, overrides: Partial<SessionMeta> = {}): SessionMeta {
     claude: null,
     resumeCount: 0,
     autoAnswer: null,
+    archived: false,
     startedAt: '2026-01-01T00:00:00.000Z',
     endedAt: null,
     exitCode: null,
@@ -92,6 +93,21 @@ describe('SessionStore', () => {
     expect(loaded?.state).toBe('interrupted');
     expect(loaded?.endedAt).not.toBeNull();
     expect(readMeta(A).state).toBe('interrupted');
+  });
+
+  it('defaults archived to false for a meta.json written before the flag existed', () => {
+    store.create(meta(A, { state: 'exited' }));
+    const legacy = JSON.parse(readFileSync(join(root, A, 'meta.json'), 'utf8')) as Partial<SessionMeta>;
+    delete legacy.archived;
+    writeFileSync(join(root, A, 'meta.json'), JSON.stringify(legacy));
+    expect(new SessionStore(root).loadAll()[0]?.archived).toBe(false);
+  });
+
+  it('keeps archived across a reload', () => {
+    store.create(meta(A, { state: 'exited', archived: true }));
+    store.create(meta(B, { state: 'exited' }));
+    const loaded = new SessionStore(root).loadAll();
+    expect(loaded.map((s) => [s.id, s.archived])).toEqual([[A, true], [B, false]]);
   });
 
   it('never prunes: all sessions come back no matter how old or large', () => {

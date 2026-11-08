@@ -87,6 +87,7 @@ export class SessionStore {
       claude: raw.claude ? { ...raw.claude, provider: raw.claude.provider === 'opencode' ? 'opencode' : 'claude' } : null,
       resumeCount: raw.resumeCount ?? 0,
       autoAnswer: raw.autoAnswer ?? null,
+      archived: raw.archived === true,
       startedAt,
       endedAt: raw.endedAt ?? (wasRunning ? this.lastWrite(id, startedAt) : null),
       exitCode: raw.exitCode ?? null,

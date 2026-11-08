@@ -18,6 +18,8 @@ export interface SessionService {
   hookNotify(notification: { hubSessionId?: string; sessionId?: string; message: string }): boolean;
   stop(id: string): void;
   remove(id: string): Promise<void>;
+  removeMany(ids: string[]): Promise<void>;
+  setArchived(id: string, archived: boolean): SessionInfo;
   setTitle(id: string, title: string): SessionInfo;
   size(id: string): number;
   readChunks(id: string, start: number, end: number): AsyncGenerator<Buffer>;

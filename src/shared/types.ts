@@ -53,6 +53,8 @@ export interface SessionMeta {
   claude: AgentInfo | null;
   resumeCount: number;
   autoAnswer: AutoAnswerPolicy | null;
+  /** Hidden from the main list; only a session that is not running can be archived. Absent in older meta.json files. */
+  archived: boolean;
   startedAt: string;
   endedAt: string | null;
   exitCode: number | null;
@@ -124,6 +126,8 @@ export interface HubApi {
   resumeSession(id: string): Promise<void>;
   answer(id: string, request: AnswerRequest): Promise<string>;
   deleteSession(id: string): Promise<boolean>;
+  deleteSessions(ids: string[]): Promise<number>;
+  archiveSession(id: string, archived: boolean): Promise<void>;
   deleteAllHistory(): Promise<boolean>;
   renameSession(id: string, title: string): Promise<void>;
   pickFolder(): Promise<string | null>;

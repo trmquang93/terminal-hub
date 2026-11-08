@@ -64,8 +64,19 @@ the app while a session is live: a running session blocks every step, and the ch
 - `sessions/<uuid>/meta.json`, `output.log` (raw PTY bytes), `input.log`, `answers.log` (auto-answers)
 - `token` (0600), `api.json` (0600, rewritten on start, removed on clean quit), `update.json` (optional), `update.log`
 
-Nothing is pruned automatically. Deleting is explicit: *Delete session* (confirm), *Delete all history…* (confirm), `hub rm`.
+Nothing is pruned automatically. Deleting is explicit: *Delete session* (the ×) and *Delete selected* delete at once with no
+confirmation, `hub rm` and `POST /sessions/delete` likewise; only *Delete all history…* asks first.
 Quitting stops running processes (SIGHUP, SIGKILL after 3 s), records the exit, keeps all files. They load as `interrupted`.
+
+## Sidebar: groups, archive, select
+
+- Sessions are grouped by working folder (header: folder name + shortened path). A group with a running or waiting session
+  sits above idle groups; otherwise groups are ordered by their newest session, and sessions inside a group newest first.
+- **Archive** hides a finished session in the collapsed *Archived (N)* section at the bottom (click to expand). Archived rows can
+  still be opened (output replay), unarchived and deleted. `meta.json` carries `archived: boolean` (missing = `false`);
+  a running session cannot be archived (400), and resuming an archived session unarchives it. New sessions are never archived.
+- **Select** switches the rows to checkboxes (a row click toggles instead of opening). The header shows `N selected`,
+  *Delete selected* and *Cancel*. Running sessions in the selection are killed, then every folder is removed. No confirmation.
 
 ## Claude Code sessions
 
@@ -138,15 +149,18 @@ up and reply with `hub answer <id> …` instead of polling. Create `~/Library/Ap
 
 ## HTTP API (127.0.0.1, `Authorization: Bearer <token>` except `/health`)
 
-`GET /health` · `GET /sessions[?attention=1]` · `POST /sessions` · `GET /sessions/:id` · `GET …/output?offset&limit` · `GET …/text?offset` ·
+`GET /health` · `GET /sessions[?attention=1]` (includes archived sessions; each has `archived`) · `POST /sessions` · `GET /sessions/:id` · `GET …/output?offset&limit` · `GET …/text?offset` ·
 `GET …/stream` (SSE) · `GET /events` (SSE: attention + exit) · `POST …/input` · `POST …/answer` · `POST …/stop` · `POST …/resume` ·
-`POST …/title` · `DELETE /sessions/:id` · `POST /hooks/claude`
+`POST …/title` · `POST …/archive` `{ "archived": true|false }` (returns the session; 400 while it runs) · `DELETE /sessions/:id` ·
+`POST /sessions/delete` `{ "ids": [...] }` (no confirmation; kills running ones; 404 and nothing deleted if an id is unknown) · `POST /hooks/claude`
 
 ## CLI
 
 ```
 hub run [--cwd DIR] [--title T] [--unattended] [-q] -- CMD ARGS…   exits with the child's code
-hub ls | text <id> [--follow] | send <id> "text" | stop <id> | rm <id> | resume <id> [--follow]
+hub ls                          marks archived sessions in an ARCHIVED column
+hub text <id> [--follow] | send <id> "text" | stop <id> | rm <id> | resume <id> [--follow]
+hub archive <id> | unarchive <id>
 hub wait <id> [--timeout S]     exit 10 on attention (prints the question), child's code on exit, 124 on timeout
 hub answer <id> yes|no|enter|esc|tab|up|down|1-9|<text>
 hub notify-test                 send one synthetic attention event to the webhook in notify.json

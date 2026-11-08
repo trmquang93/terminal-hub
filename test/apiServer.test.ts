@@ -15,7 +15,7 @@ const LOG = Buffer.from('\x1b[1;34mdir\x1b[0m\r\nfile\r\n');
 
 function info(id: string, running: boolean): SessionInfo {
   return {
-    id, title: id.slice(0, 4), cwd: '/tmp', command: 'ls', argv: [], env: {}, state: running ? 'running' : 'exited', claude: null, resumeCount: 0, autoAnswer: null, attention: null,
+    id, title: id.slice(0, 4), cwd: '/tmp', command: 'ls', argv: [], env: {}, state: running ? 'running' : 'exited', claude: null, resumeCount: 0, autoAnswer: null, archived: false, attention: null,
     startedAt: '2026-01-01T00:00:00.000Z', endedAt: running ? null : '2026-01-01T00:00:01.000Z', exitCode: running ? null : 0, signal: null,
     cols: 80, rows: 24, bytesWritten: LOG.length, appVersion: 't', running, resumable: !running,
   };
@@ -24,6 +24,7 @@ function info(id: string, running: boolean): SessionInfo {
 const sessions = [info(RUNNING, true), info(EXITED, false)];
 const written: string[] = [];
 const hooks: unknown[] = [];
+const removedMany: string[][] = [];
 const attentionListeners = new Set<(session: SessionInfo) => void>();
 const outputListeners = new Set<(chunk: OutputChunk) => void>();
 const changedListeners = new Set<(session: SessionInfo) => void>();
@@ -55,6 +56,17 @@ const service: SessionService = {
   },
   stop: () => undefined,
   remove: () => Promise.resolve(),
+  removeMany: (ids) => {
+    for (const id of ids) if (!sessions.some((s) => s.id === id)) throw new HubError(404, `no such session: ${id}`);
+    removedMany.push(ids);
+    return Promise.resolve();
+  },
+  setArchived: (id, archived) => {
+    const index = sessions.findIndex((s) => s.id === id);
+    const current = sessions[index] as SessionInfo;
+    if (archived && current.running) throw new HubError(400, 'cannot archive a running session; stop it first');
+    return (sessions[index] = { ...current, archived });
+  },
   setTitle: (id, title) => ({ ...info(id, true), title }),
   size: () => LOG.length,
   readChunks: async function* (_id, start, end) {
@@ -268,5 +280,42 @@ describe('API routes', () => {
 
   it('surfaces resume conflicts as 409', async () => {
     expect((await request(`/sessions/${RUNNING}/resume`, { method: 'POST', headers: auth })).status).toBe(409);
+  });
+});
+
+describe('API archive and batch delete', () => {
+  const post = (path: string, body: string, headers: Record<string, string> = auth) => request(path, { method: 'POST', headers, body });
+
+  it('archives and unarchives through POST /sessions/:id/archive, and GET /sessions keeps archived ones with the flag', async () => {
+    const archived = await post(`/sessions/${EXITED}/archive`, '{"archived":true}');
+    expect(archived.status).toBe(200);
+    expect(JSON.parse(archived.body)).toMatchObject({ id: EXITED, archived: true });
+    const list = JSON.parse((await request('/sessions', { headers: auth })).body) as SessionInfo[];
+    expect(list.map((s) => [s.id, s.archived])).toEqual([[RUNNING, false], [EXITED, true]]);
+    expect(JSON.parse((await post(`/sessions/${EXITED}/archive`, '{"archived":false}')).body)).toMatchObject({ id: EXITED, archived: false });
+  });
+
+  it('refuses to archive a running session (400), rejects a non-boolean body (400) and an unknown id (404)', async () => {
+    expect((await post(`/sessions/${RUNNING}/archive`, '{"archived":true}')).status).toBe(400);
+    expect((await post(`/sessions/${EXITED}/archive`, '{"archived":"yes"}')).status).toBe(400);
+    expect((await post(`/sessions/${EXITED}/archive`, '{}')).status).toBe(400);
+    expect((await post('/sessions/33333333-3333-4333-8333-333333333333/archive', '{"archived":true}')).status).toBe(404);
+  });
+
+  it('deletes several sessions with POST /sessions/delete and validates the body', async () => {
+    removedMany.length = 0;
+    expect(JSON.parse((await post('/sessions/delete', `{"ids":["${RUNNING}","${EXITED}"]}`)).body)).toEqual({ ok: true, deleted: 2 });
+    expect(removedMany).toEqual([[RUNNING, EXITED]]);
+    expect((await post('/sessions/delete', '{"ids":"x"}')).status).toBe(400);
+    expect((await post('/sessions/delete', '{"ids":[1]}')).status).toBe(400);
+    expect((await post('/sessions/delete', '{}')).status).toBe(400);
+    expect((await post('/sessions/delete', '{"ids":["33333333-3333-4333-8333-333333333333"]}')).status).toBe(404);
+    expect(removedMany).toHaveLength(1);
+  });
+
+  it('requires the token for archive and batch delete', async () => {
+    expect((await post(`/sessions/${EXITED}/archive`, '{"archived":true}', {})).status).toBe(401);
+    expect((await post('/sessions/delete', `{"ids":["${EXITED}"]}`, {})).status).toBe(401);
+    expect(removedMany).toHaveLength(1);
   });
 });
