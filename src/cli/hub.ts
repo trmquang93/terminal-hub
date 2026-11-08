@@ -19,6 +19,8 @@ const USAGE = `usage:
   hub resume <id> [--follow]                          resume (Claude Code) or restart (other commands)
   hub archive <id>                                    move a finished session to the Archived list (refused while it runs)
   hub unarchive <id>                                  move it back
+  hub rename <id> <title>                             set the title and pin it (the program's terminal-title escapes no longer change it)
+  hub rename <id> --auto                              unpin: the program's terminal-title escapes set the title again
   hub rm <id>                                         delete the session and its files
   hub watch                                           stream attention, turn (working|waiting|done) and exit events as JSON lines until Ctrl-C
   hub notify-test                                     send one synthetic "attention" event to the endpoint in notify.json and print the HTTP result
@@ -326,6 +328,14 @@ async function main(argv: string[]): Promise<number> {
     case 'unarchive': {
       const id = await resolveId(api, args[0]);
       await call(api, `/sessions/${id}/archive`, { method: 'POST', body: { archived: command === 'archive' } });
+      return 0;
+    }
+    case 'rename': {
+      const { flags, rest } = parseFlags(args, [], ['--auto']);
+      const id = await resolveId(api, rest[0]);
+      const title = rest.slice(1).join(' ');
+      if (flags.has('--auto') === (title !== '')) throw new CliError(`give either <title> or --auto\n\n${USAGE}`);
+      await call(api, `/sessions/${id}/title`, { method: 'POST', body: flags.has('--auto') ? { auto: true } : { title } });
       return 0;
     }
     case 'stop':

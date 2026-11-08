@@ -21,6 +21,7 @@ export interface SessionService {
   removeMany(ids: string[]): Promise<void>;
   setArchived(id: string, archived: boolean): SessionInfo;
   setTitle(id: string, title: string): SessionInfo;
+  releaseTitle(id: string): SessionInfo;
   size(id: string): number;
   readChunks(id: string, start: number, end: number): AsyncGenerator<Buffer>;
   readOutput(id: string, offset: number, limit: number): Promise<Buffer>;

@@ -15,7 +15,7 @@ const LOG = Buffer.from('\x1b[1;34mdir\x1b[0m\r\nfile\r\n');
 
 function info(id: string, running: boolean): SessionInfo {
   return {
-    id, title: id.slice(0, 4), cwd: '/tmp', command: 'ls', argv: [], env: {}, state: running ? 'running' : 'exited', claude: null, resumeCount: 0, autoAnswer: null, archived: false, attention: null, turn: null,
+    id, title: id.slice(0, 4), cwd: '/tmp', command: 'ls', argv: [], env: {}, state: running ? 'running' : 'exited', claude: null, resumeCount: 0, autoAnswer: null, archived: false, titleSource: 'auto', attention: null, turn: null,
     startedAt: '2026-01-01T00:00:00.000Z', endedAt: running ? null : '2026-01-01T00:00:01.000Z', exitCode: running ? null : 0, signal: null,
     cols: 80, rows: 24, bytesWritten: LOG.length, appVersion: 't', running, resumable: !running,
   };
@@ -68,7 +68,8 @@ const service: SessionService = {
     if (archived && current.running) throw new HubError(400, 'cannot archive a running session; stop it first');
     return (sessions[index] = { ...current, archived });
   },
-  setTitle: (id, title) => ({ ...info(id, true), title }),
+  setTitle: (id, title) => ({ ...info(id, true), title, titleSource: 'manual' }),
+  releaseTitle: (id) => ({ ...info(id, true), titleSource: 'auto' }),
   size: () => LOG.length,
   readChunks: async function* (_id, start, end) {
     await Promise.resolve();
@@ -355,5 +356,33 @@ describe('API archive and batch delete', () => {
     expect((await post(`/sessions/${EXITED}/archive`, '{"archived":true}', {})).status).toBe(401);
     expect((await post('/sessions/delete', `{"ids":["${EXITED}"]}`, {})).status).toBe(401);
     expect(removedMany).toHaveLength(1);
+  });
+});
+
+describe('API title', () => {
+  const post = (path: string, body: string, headers: Record<string, string> = auth) => request(path, { method: 'POST', headers, body });
+
+  it('a manual title pins it: POST /sessions/:id/title { title } returns titleSource manual', async () => {
+    const result = await post(`/sessions/${RUNNING}/title`, '{"title":"My name"}');
+    expect(result.status).toBe(200);
+    expect(JSON.parse(result.body)).toMatchObject({ id: RUNNING, title: 'My name', titleSource: 'manual' });
+  });
+
+  it('{ "auto": true } releases the pin and returns titleSource auto', async () => {
+    const result = await post(`/sessions/${RUNNING}/title`, '{"auto":true}');
+    expect(result.status).toBe(200);
+    expect(JSON.parse(result.body)).toMatchObject({ id: RUNNING, titleSource: 'auto' });
+  });
+
+  it('GET /sessions/:id exposes titleSource', async () => {
+    expect(JSON.parse((await request(`/sessions/${RUNNING}`, { headers: auth })).body)).toMatchObject({ titleSource: 'auto' });
+  });
+
+  it('rejects a bad body (400): no title, non-string title, auto not true, auto together with title', async () => {
+    for (const body of ['{}', '{"title":5}', '{"auto":false}', '{"auto":"yes"}', '{"auto":true,"title":"x"}']) {
+      expect((await post(`/sessions/${RUNNING}/title`, body)).status, body).toBe(400);
+    }
+    expect((await post('/sessions/33333333-3333-4333-8333-333333333333/title', '{"auto":true}')).status).toBe(404);
+    expect((await post(`/sessions/${RUNNING}/title`, '{"auto":true}', {})).status).toBe(401);
   });
 });

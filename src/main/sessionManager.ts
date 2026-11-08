@@ -9,6 +9,7 @@ import { AttentionTracker, resolveAnswer, SAFE_UNATTENDED_POLICY } from './atten
 import { discoverSessionId, fillTemplate, findClaudeIndex, hasSettingsFlag, planClaudeLaunch, renderCommand, SESSION_PLACEHOLDER, transcriptExists, withSettings } from './claude';
 import { HubError } from './errors';
 import { discoverOpencodeSessionId, opencodeSessionExists, planOpencodeLaunch } from './opencode';
+import { OscTitleParser } from './oscTitle';
 import type { OutputChunk, SessionService } from './service';
 import type { SessionStore } from './sessionStore';
 
@@ -86,6 +87,7 @@ export class SessionManager implements SessionService {
   private readonly discoveryTimers = new Map<string, ReturnType<typeof setInterval>>();
   private readonly trackers = new Map<string, AttentionTracker>();
   private readonly turns = new Map<string, TurnTracker>();
+  private readonly titleParsers = new Map<string, OscTitleParser>();
   private readonly baseEnv: () => NodeJS.ProcessEnv;
   private shuttingDown = false;
 
@@ -107,7 +109,7 @@ export class SessionManager implements SessionService {
   private info(meta: SessionMeta): SessionInfo {
     const running = this.live.has(meta.id);
     const resumable = !running && (meta.claude === null || meta.claude.sessionId !== null);
-    return { ...meta, running, resumable, attention: this.trackers.get(meta.id)?.attention ?? null, turn: running ? (this.turns.get(meta.id)?.turn ?? null) : null };
+    return { ...meta, titleSource: meta.titleSource ?? 'auto', running, resumable, attention: this.trackers.get(meta.id)?.attention ?? null, turn: running ? (this.turns.get(meta.id)?.turn ?? null) : null };
   }
 
   list(): SessionInfo[] {
@@ -275,6 +277,7 @@ export class SessionManager implements SessionService {
     }
     this.live.set(meta.id, child);
     this.turns.set(meta.id, new TurnTracker(() => this.live.has(meta.id) && this.emitTurn(meta)));
+    this.titleParsers.set(meta.id, new OscTitleParser());
     this.trackers.set(
       meta.id,
       new AttentionTracker({
@@ -296,6 +299,19 @@ export class SessionManager implements SessionService {
     meta.bytesWritten = endOffset;
     this.emitter.emit('output', { id: meta.id, endOffset, data });
     this.trackers.get(meta.id)?.output(data);
+    const title = this.titleParsers.get(meta.id)?.push(data).at(-1);
+    if (title !== undefined) this.applyEscapeTitle(meta, title);
+  }
+
+  /** The program set its terminal title (OSC 0/2), like a tab title in iTerm2. A manual rename wins. */
+  private applyEscapeTitle(meta: SessionMeta, raw: string): void {
+    if (meta.titleSource === 'manual') return;
+    const title = raw.trim().slice(0, 200).trim();
+    if (!title || title === meta.title) return;
+    meta.title = title;
+    meta.titleSource = 'auto';
+    this.store.writeMeta(meta);
+    this.emitChanged(meta);
   }
 
   private emitAttention(meta: SessionMeta): void {
@@ -334,6 +350,7 @@ export class SessionManager implements SessionService {
     this.trackers.get(meta.id)?.stop();
     this.trackers.delete(meta.id);
     this.turns.delete(meta.id);
+    this.titleParsers.delete(meta.id);
     this.store.close(meta.id);
     Object.assign(meta, {
       state: this.shuttingDown ? 'interrupted' : 'exited',
@@ -459,6 +476,16 @@ export class SessionManager implements SessionService {
     const trimmed = title.trim();
     if (!trimmed) throw new HubError(400, 'title must not be empty');
     meta.title = trimmed.slice(0, 200);
+    meta.titleSource = 'manual';
+    this.store.writeMeta(meta);
+    this.emitChanged(meta);
+    return this.info(meta);
+  }
+
+  /** Releases a manual rename: the title stays until the program sets a new one. */
+  releaseTitle(id: string): SessionInfo {
+    const meta = this.require(id);
+    meta.titleSource = 'auto';
     this.store.writeMeta(meta);
     this.emitChanged(meta);
     return this.info(meta);

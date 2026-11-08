@@ -85,6 +85,13 @@ A command that runs `claude` (directly, via `env`, an absolute path, `npx …`) 
 `hub resume`) relaunches in the same entry with `claude --resume <uuid>` and the same cwd/env, appending to the same
 `output.log` after a `── resumed … ──` line. Other commands get **Restart**. Nothing is ever resumed automatically.
 
+**Session title.** Like a tab title in iTerm2, the title follows the terminal-title escape sequences the program prints
+(OSC 0 and OSC 2, ended by BEL or `ESC \`; OSC 1 is ignored), so Claude Code can name its own session; the change is
+saved to `meta.json` and shown live. A manual rename (double-click in the sidebar, `hub rename <id> <title>`,
+`POST /sessions/:id/title {"title": …}`) pins the title and the program's escapes no longer change it.
+`hub rename <id> --auto` or `POST /sessions/:id/title {"auto": true}` unpins it, and the next title the program sets wins.
+`meta.titleSource` (`auto` or `manual`, also on `GET /sessions/:id`) records which mode is active; a missing value means `auto`.
+
 ## OpenCode sessions
 
 The **OpenCode (opencode)** preset starts `opencode`; the same detection covers `env`, an absolute path, `npx opencode-ai …`.
@@ -181,7 +188,7 @@ up and reply with `hub answer <id> …` instead of polling. Create `~/Library/Ap
 
 `GET /health` · `GET /sessions[?attention=1]` (includes archived sessions; each has `archived`) · `POST /sessions` · `GET /sessions/:id` · `GET …/output?offset&limit` · `GET …/text?offset` ·
 `GET …/stream` (SSE) · `GET /events` (SSE: attention + turn + exit) · `POST …/input` · `POST …/answer` · `POST …/stop` · `POST …/resume` ·
-`POST …/title` · `POST …/archive` `{ "archived": true|false }` (returns the session; 400 while it runs) · `DELETE /sessions/:id` ·
+`POST …/title` `{ "title": "…" }` pins, `{ "auto": true }` unpins · `POST …/archive` `{ "archived": true|false }` (returns the session; 400 while it runs) · `DELETE /sessions/:id` ·
 `POST /sessions/delete` `{ "ids": [...] }` (no confirmation; kills running ones; 404 and nothing deleted if an id is unknown) · `POST /hooks/claude`
 
 ## CLI
@@ -191,6 +198,7 @@ hub run [--cwd DIR] [--title T] [--unattended] [-q] -- CMD ARGS…   exits with 
 hub ls                          marks archived sessions in an ARCHIVED column
 hub text <id> [--follow] | send <id> "text" | stop <id> | rm <id> | resume <id> [--follow]
 hub archive <id> | unarchive <id>
+hub rename <id> <title> | rename <id> --auto   pin a title / let the program's terminal title set it again
 hub wait <id> [--timeout S]     exit 10 on attention (prints the question), child's code on exit, 124 on timeout
 hub answer <id> yes|no|enter|esc|tab|up|down|1-9|<text>
 hub watch                       stream attention / turn / exit events as JSON lines (Ctrl-C exits 0)

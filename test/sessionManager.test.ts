@@ -403,3 +403,88 @@ describe('SessionManager — archive and batch delete', () => {
     expect(existsSync(join(base, 'sessions', id))).toBe(true);
   });
 });
+
+describe('SessionManager — terminal title escapes', () => {
+  // Reads one line per title from the terminal, sets it with OSC 2 and then prints `done:<line>` so a test knows it was processed.
+  const TITLER = 'while read l; do printf "\\033]2;%s\\007" "$l"; echo "done:$l"; done';
+
+  const until = async (m: SessionManager, id: string, line: string): Promise<void> => {
+    for (let i = 0; i < 200 && !(await text(m, id)).includes(`done:${line}`); i++) await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(await text(m, id)).toContain(`done:${line}`);
+  };
+  const set = async (m: SessionManager, id: string, line: string): Promise<void> => {
+    m.write(id, `${line}\n`);
+    await until(m, id, line);
+  };
+  const titler = (m: SessionManager): { id: string; changes: SessionInfo[] } => {
+    const { id } = m.start({ cwd: work, command: 'sh', args: ['-c', TITLER] });
+    const changes: SessionInfo[] = [];
+    m.onChanged((session) => session.id === id && changes.push(session));
+    return { id, changes };
+  };
+
+  it('an OSC 2 title replaces the title, persists meta.json and emits changed', async () => {
+    const m = manager();
+    const { id, changes } = titler(m);
+    expect(m.get(id)).toMatchObject({ title: 'sh — work', titleSource: 'auto' });
+    await set(m, id, 'Fix the build ✳');
+    expect(m.get(id)).toMatchObject({ title: 'Fix the build ✳', titleSource: 'auto' });
+    expect(readMeta(id)).toMatchObject({ title: 'Fix the build ✳', titleSource: 'auto' });
+    expect(changes.map((session) => session.title)).toEqual(['Fix the build ✳']);
+    expect(manager().get(id)?.title).toBe('Fix the build ✳');
+  });
+
+  it('caps the title at 200 characters', async () => {
+    const m = manager();
+    const { id } = titler(m);
+    await set(m, id, 'z'.repeat(300));
+    expect(m.get(id)?.title).toBe('z'.repeat(200));
+  });
+
+  it('a manual rename pins the title against later escape titles', async () => {
+    const m = manager();
+    const { id } = titler(m);
+    await set(m, id, 'from program');
+    expect(m.setTitle(id, '  Mine  ')).toMatchObject({ title: 'Mine', titleSource: 'manual' });
+    await set(m, id, 'program again');
+    expect(m.get(id)).toMatchObject({ title: 'Mine', titleSource: 'manual' });
+    expect(readMeta(id)).toMatchObject({ title: 'Mine', titleSource: 'manual' });
+  });
+
+  it('releasing the pin lets the next escape title win', async () => {
+    const m = manager();
+    const { id, changes } = titler(m);
+    m.setTitle(id, 'Mine');
+    await set(m, id, 'ignored');
+    expect(m.releaseTitle(id)).toMatchObject({ title: 'Mine', titleSource: 'auto' });
+    expect(readMeta(id).titleSource).toBe('auto');
+    await set(m, id, 'wins');
+    expect(m.get(id)).toMatchObject({ title: 'wins', titleSource: 'auto' });
+    expect(changes.map((session) => session.title)).toEqual(['Mine', 'Mine', 'wins']);
+  });
+
+  it('an identical title neither rewrites meta.json nor emits changed', async () => {
+    const m = manager();
+    const { id, changes } = titler(m);
+    await set(m, id, 'same');
+    const metaPath = join(base, 'sessions', id, 'meta.json');
+    writeFileSync(metaPath, `${readFileSync(metaPath, 'utf8')} `); // a rewrite would drop this marker
+    const before = readFileSync(metaPath, 'utf8');
+    await set(m, id, 'same');
+    expect(readFileSync(metaPath, 'utf8')).toBe(before);
+    expect(changes).toHaveLength(1);
+    await set(m, id, 'other');
+    expect(changes.map((session) => session.title)).toEqual(['same', 'other']);
+  });
+
+  it('a session whose meta.json has no titleSource counts as auto', async () => {
+    const m = manager();
+    const { id } = m.start({ cwd: work, command: 'sh', args: ['-c', 'true'] });
+    await exited(m, id);
+    const metaPath = join(base, 'sessions', id, 'meta.json');
+    const legacy = JSON.parse(readFileSync(metaPath, 'utf8')) as Record<string, unknown>;
+    delete legacy.titleSource;
+    writeFileSync(metaPath, JSON.stringify(legacy));
+    expect(manager().get(id)?.titleSource).toBe('auto');
+  });
+});

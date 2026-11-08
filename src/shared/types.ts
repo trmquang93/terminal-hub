@@ -1,6 +1,8 @@
 /** `restored` is reserved: a resumed session reports `running` while live. */
 export type SessionState = 'running' | 'exited' | 'interrupted' | 'restored';
 
+export type TitleSource = 'auto' | 'manual';
+
 export interface AgentInfo {
   provider: 'claude' | 'opencode';
   configDir: string;
@@ -52,6 +54,8 @@ export interface AnswerRequest {
 export interface SessionMeta {
   id: string;
   title: string;
+  /** `manual`: the user pinned the title, terminal-title escapes from the program are ignored. Missing (older meta.json) means `auto`. */
+  titleSource?: TitleSource;
   cwd: string;
   command: string;
   argv: string[];

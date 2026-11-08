@@ -284,7 +284,12 @@ export function createApiServer(options: ApiOptions): Server {
         return sendJson(res, 200, service.setArchived(id, archived));
       }
       if (action === 'title') {
-        const { title } = await readJson(req);
+        const { title, auto } = await readJson(req);
+        if (auto !== undefined) {
+          if (auto !== true) throw new HubError(400, 'auto must be true');
+          if (title !== undefined) throw new HubError(400, 'give either title or auto, not both');
+          return sendJson(res, 200, service.releaseTitle(id));
+        }
         if (typeof title !== 'string') throw new HubError(400, 'title must be a string');
         return sendJson(res, 200, service.setTitle(id, title));
       }

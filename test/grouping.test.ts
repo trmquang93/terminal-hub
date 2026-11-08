@@ -6,7 +6,7 @@ function session(id: string, cwd: string, startedAt: string, overrides: Partial<
   return {
     id, title: id, cwd, command: 'sh', argv: [], env: {}, state: 'exited', claude: null, resumeCount: 0, autoAnswer: null, archived: false,
     startedAt, endedAt: startedAt, exitCode: 0, signal: null, cols: 80, rows: 24, bytesWritten: 0, appVersion: 't',
-    running: false, attention: null, resumable: true, ...overrides,
+    running: false, attention: null, turn: null, resumable: true, ...overrides,
   };
 }
 
