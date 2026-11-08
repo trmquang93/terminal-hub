@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { HubDefaults, SessionInfo, StartSessionOptions } from '../shared/types';
+import type { HubDefaults, SessionInfo, StartSessionOptions, UpdaterStatus } from '../shared/types';
 import { formatTime, shortenPath } from './format';
 import { NewSessionDialog } from './NewSessionDialog';
 import { TerminalView } from './TerminalView';
@@ -70,6 +70,11 @@ function SessionRow({ session, home, selected, onSelect, onDelete }: { session: 
       </div>
     </li>
   );
+}
+
+function UpdateChip({ status }: { status: UpdaterStatus }) {
+  if (status.phase === 'idle' || status.phase === 'checking') return null;
+  return <div className={status.phase === 'error' ? 'update-chip error' : 'update-chip'}>{status.message}</div>;
 }
 
 const NUMBERED_MENU = /❯\s*1[.)]|^\s*1[.)]\s/m;
@@ -148,6 +153,7 @@ export function App() {
   const [defaults, setDefaults] = useState<HubDefaults | null>(null);
   const [dialog, setDialog] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [update, setUpdate] = useState<UpdaterStatus | null>(null);
   const announced = useRef(new Map<string, string>());
 
   const refreshDefaults = useCallback(() => window.hub.defaults().then(setDefaults), []);
@@ -158,6 +164,8 @@ export function App() {
       setSelectedId((current) => current ?? [...list].sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0]?.id ?? null);
     });
     void refreshDefaults();
+    void window.hub.getUpdate().then(setUpdate);
+    const offUpdate = window.hub.onUpdate(setUpdate);
     const offChanged = window.hub.onSessionChanged((session) => {
       const since = session.attention?.reason === 'prompt' ? session.attention.since : undefined;
       if (since === undefined) announced.current.delete(session.id);
@@ -178,6 +186,7 @@ export function App() {
       if (action === 'new') setDialog(true);
     });
     return () => {
+      offUpdate();
       offChanged();
       offRemoved();
       offMenu();
@@ -202,6 +211,7 @@ export function App() {
           <button className="primary" onClick={() => setDialog(true)}>
             + New session
           </button>
+          {update && <UpdateChip status={update} />}
         </div>
         <ul className="sessions">
           {ordered.map((session) => (

@@ -103,6 +103,16 @@ export interface HubDefaults {
   recentFolders: string[];
 }
 
+export type UpdaterPhase = 'idle' | 'checking' | 'available' | 'building' | 'installing' | 'error';
+
+export interface UpdaterStatus {
+  phase: UpdaterPhase;
+  /** Commits on origin that the checkout does not have yet. */
+  ahead: number;
+  /** Chip text for `available`, `building`, `installing` and `error`; free text otherwise. */
+  message: string;
+}
+
 export interface HubApi {
   defaults(): Promise<HubDefaults>;
   listSessions(): Promise<SessionInfo[]>;
@@ -122,4 +132,6 @@ export interface HubApi {
   onOutput(callback: (event: OutputEvent) => void): () => void;
   onMenu(callback: (action: MenuAction) => void): () => void;
   onSelect(callback: (id: string) => void): () => void;
+  getUpdate(): Promise<UpdaterStatus>;
+  onUpdate(callback: (status: UpdaterStatus) => void): () => void;
 }

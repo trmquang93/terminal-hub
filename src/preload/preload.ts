@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
-import type { HubApi, MenuAction, OutputEvent, SessionInfo } from '../shared/types';
+import type { HubApi, MenuAction, OutputEvent, SessionInfo, UpdaterStatus } from '../shared/types';
 
 function subscribe<T>(channel: string, callback: (payload: T) => void): () => void {
   const listener = (_event: IpcRendererEvent, payload: T): void => callback(payload);
@@ -26,6 +26,8 @@ const api: HubApi = {
   onOutput: (callback) => subscribe<OutputEvent>('hub:output', callback),
   onMenu: (callback) => subscribe<MenuAction>('hub:menu', callback),
   onSelect: (callback) => subscribe<string>('hub:select', callback),
+  getUpdate: () => ipcRenderer.invoke('hub:getUpdate'),
+  onUpdate: (callback) => subscribe<UpdaterStatus>('hub:update', callback),
 };
 
 contextBridge.exposeInMainWorld('hub', api);

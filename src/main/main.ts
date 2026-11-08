@@ -12,6 +12,7 @@ import { dataDir } from './paths';
 import { SessionManager } from './sessionManager';
 import { SessionStore } from './sessionStore';
 import { loginShellPath } from './shellEnv';
+import { isDryRun, Updater } from './updater';
 
 const REPLAY_BYTES = 8 * 1024 * 1024;
 const RECENT_FOLDERS = 12;
@@ -25,6 +26,7 @@ app.setPath('userData', join(dir, 'electron'));
 let window: BrowserWindow | null = null;
 let manager: SessionManager;
 let notifier: AttentionNotifier | null = null;
+let updater: Updater | null = null;
 let apiServer: Server | null = null;
 let quitting = false;
 const startedAt = new Date().toISOString();
@@ -88,6 +90,7 @@ function registerIpc(): void {
     return ok;
   });
   ipcMain.handle('hub:deleteAll', deleteAllHistory);
+  ipcMain.handle('hub:getUpdate', () => updater?.getStatus() ?? { phase: 'idle', ahead: 0, message: 'auto-update off' });
   ipcMain.handle('hub:pickFolder', async () => {
     const options = { properties: ['openDirectory' as const, 'createDirectory' as const] };
     const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
@@ -173,11 +176,23 @@ async function startServices(): Promise<void> {
   apiServer = createApiServer({ service: manager, token, version: app.getVersion(), startedAt });
   const port = await listenOnLoopback(apiServer);
   writeApiFile(dir, { baseUrl: `http://127.0.0.1:${port}`, token, pid: process.pid });
+  updater = new Updater({
+    manager,
+    isPackaged: app.isPackaged,
+    dataDir: dir,
+    quit: shutdown,
+    resourcesPath: app.isPackaged ? process.resourcesPath : undefined,
+    env: baseEnv,
+    dryRun: isDryRun(process.env),
+    onStatus: (status) => send('hub:update', status),
+  });
+  updater.start();
 }
 
 async function shutdown(): Promise<void> {
   if (quitting) return;
   quitting = true;
+  updater?.stop();
   removeApiFile(dir);
   apiServer?.close();
   apiServer?.closeAllConnections();

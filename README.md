@@ -29,12 +29,40 @@ npm run install:app   # package, then replace /Applications/Terminal Hub.app and
   (or give one of them its own `TERMINAL_HUB_DATA_DIR`).
 - First launch from Spotlight may show a macOS prompt about files on a removable volume if a login-shell rc file touches `/Volumes`.
 
+## Automatic updates
+
+The installed app updates itself from the git checkout it was built from, **only when no session is running**. It never quits
+the app while a session is live: a running session blocks every step, and the check is repeated right before the quit.
+
+- **Source (first match wins):** `update.json` `repo` in the data dir → `build-info.json` in the app's Resources (written by
+  `scripts/build-info.mjs` during `package:app`; holds the repo path, commit, branch) → the current directory when it is a
+  terminal-hub checkout (dev). A bad or missing source turns auto-update off with one `WARN` line in `update.log`; it never throws.
+- **`update.json`** (optional, `<data dir>/update.json`; every key optional):
+
+  ```json
+  { "repo": "/Users/me/terminal-hub", "branch": "main", "checkMinutes": 5, "enabled": true }
+  ```
+
+  Defaults: branch `main`, every 5 minutes, enabled. `"enabled": false` switches it off. A malformed file switches it off.
+- **Each check:** `git fetch origin <branch>`, then reads `HEAD`, the current branch, `git status --porcelain` and
+  `git rev-list --count HEAD..origin/<branch>`. Nothing happens on a dirty tree, a different branch, a failed fetch, or 0 commits behind.
+- **Idle rule:** when behind, the app waits until no session has been running for 30 s (a session that starts resets the clock).
+  The header chip shows `update available (N) - waits for idle`, then `updating...`, or `update failed`. No dialog.
+- **Update:** `git pull --ff-only origin <branch>` → `npm ci` (only if `package-lock.json` changed) → `npm run package:app` →
+  check that `release/mac-arm64/Terminal Hub.app` exists → re-check that no session runs → quit through the normal shutdown and
+  start one detached `/bin/sh` that waits up to 30 s for the app to exit, runs `node scripts/install-app.mjs`, then
+  `open -a "/Applications/Terminal Hub.app"`. A step that fails is logged (command + stderr), the app keeps running, and
+  the next check retries from that step. Only a packaged app installs; `npm start` just logs.
+- **Log:** `update.log` in the data dir, rotated to `update.log.1` at 1 MB.
+- **Dry run:** `TERMINAL_HUB_UPDATE_DRY_RUN=1` logs every pull / npm / build / install / open command as `DRY-RUN would run: …`,
+  executes none of them and never quits. (The read-only check still runs `git fetch`, which only updates `origin/<branch>`.)
+
 ## Data
 
 `~/Library/Application Support/TerminalHub/` (override with `TERMINAL_HUB_DATA_DIR`)
 
 - `sessions/<uuid>/meta.json`, `output.log` (raw PTY bytes), `input.log`, `answers.log` (auto-answers)
-- `token` (0600), `api.json` (0600, rewritten on start, removed on clean quit)
+- `token` (0600), `api.json` (0600, rewritten on start, removed on clean quit), `update.json` (optional), `update.log`
 
 Nothing is pruned automatically. Deleting is explicit: *Delete session* (confirm), *Delete all history…* (confirm), `hub rm`.
 Quitting stops running processes (SIGHUP, SIGKILL after 3 s), records the exit, keeps all files. They load as `interrupted`.

@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.json --noEmit && vite build",
     "start": "npm run build && electron .",
-    "package:app": "npm run build && node scripts/build-cli.mjs && electron-builder --mac dir --arm64",
+    "package:app": "npm run build && node scripts/build-cli.mjs && node scripts/build-info.mjs && electron-builder --mac dir --arm64",
     "install:app": "npm run package:app && node scripts/install-app.mjs",
     "test": "vitest run",
     "lint": "eslint .",
@@ -54,7 +54,7 @@
       "!node_modules/{react,react-dom,scheduler,@xterm}/**/*"
     ],
     "asarUnpack": ["node_modules/node-pty/**"],
-    "extraResources": [{ "from": "build/hub", "to": "hub" }],
+    "extraResources": [{ "from": "build/hub", "to": "hub" }, { "from": "build/build-info.json", "to": "build-info.json" }],
     "mac": { "target": "dir", "identity": null, "category": "public.app-category.developer-tools", "icon": "assets/icon.icns" }
   },
   "allowScripts": {

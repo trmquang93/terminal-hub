@@ -14,6 +14,8 @@ input, select { background: #1d2026; border: 1px solid #353a44; border-radius: 6
 .sidebar { width: 300px; flex: none; display: flex; flex-direction: column; background: #1a1d22; border-right: 1px solid #2a2e36; }
 .sidebar-top { padding: 40px 12px 10px; -webkit-app-region: drag; }
 .sidebar-top button { width: 100%; -webkit-app-region: no-drag; }
+.update-chip { margin-top: 8px; padding: 3px 10px; border-radius: 10px; font-size: 11px; text-align: center; background: #1f3a5f; color: #bcd6ff; -webkit-app-region: no-drag; }
+.update-chip.error { background: #6f2a2a; color: #ffc9c4; }
 .sidebar-bottom { padding: 10px 12px; border-top: 1px solid #2a2e36; }
 .sidebar-bottom button { width: 100%; }
 .sessions { list-style: none; margin: 0; padding: 0 8px; overflow-y: auto; flex: 1; }
