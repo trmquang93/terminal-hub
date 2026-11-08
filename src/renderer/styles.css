@@ -1,0 +1,72 @@
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { font: 13px -apple-system, BlinkMacSystemFont, sans-serif; background: #14161a; color: #d7dae0; -webkit-font-smoothing: antialiased; }
+button, input, select { font: inherit; color: inherit; }
+button { background: #272b33; border: 1px solid #353a44; border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+button:hover:not(:disabled) { background: #2f343e; }
+button:disabled { opacity: 0.45; cursor: default; }
+button.primary { background: #2f6feb; border-color: #2f6feb; color: #fff; }
+button.primary:hover:not(:disabled) { background: #3d7bf0; }
+button.danger { color: #ff8a80; }
+button.icon { padding: 0 6px; background: none; border: none; font-size: 16px; line-height: 1; opacity: 0; }
+input, select { background: #1d2026; border: 1px solid #353a44; border-radius: 6px; padding: 6px 8px; width: 100%; }
+.app { display: flex; height: 100%; }
+.sidebar { width: 300px; flex: none; display: flex; flex-direction: column; background: #1a1d22; border-right: 1px solid #2a2e36; }
+.sidebar-top { padding: 40px 12px 10px; -webkit-app-region: drag; }
+.sidebar-top button { width: 100%; -webkit-app-region: no-drag; }
+.sidebar-bottom { padding: 10px 12px; border-top: 1px solid #2a2e36; }
+.sidebar-bottom button { width: 100%; }
+.sessions { list-style: none; margin: 0; padding: 0 8px; overflow-y: auto; flex: 1; }
+.session { padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 2px; }
+.session:hover { background: #22262d; }
+.session:hover .icon { opacity: 0.7; }
+.session.selected { background: #2a3140; }
+.session-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rename { padding: 2px 6px; }
+.cwd { color: #8b929e; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta { margin: 4px 0 2px; display: flex; gap: 6px; }
+.times { color: #6f7682; font-size: 11px; }
+.empty { color: #6f7682; padding: 16px; text-align: center; }
+.badge { font-size: 11px; padding: 1px 7px; border-radius: 10px; background: #353a44; }
+.badge.running { background: #1f6f3f; color: #b8f5cf; }
+.badge.exited { background: #353a44; }
+.badge.failed { background: #6f2a2a; color: #ffc9c4; }
+.badge.interrupted { background: #7a5a14; color: #ffe2a0; }
+.badge.tag { background: #3b2f5c; color: #d6c8ff; }
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.toolbar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid #2a2e36; -webkit-app-region: drag; }
+.toolbar button { -webkit-app-region: no-drag; }
+.toolbar-title { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px; background: #262a32; border-bottom: 1px solid #2a2e36; }
+.banner.interrupted { background: #3a2f12; color: #ffe2a0; }
+/* Not ".terminal": xterm gives its own element that class, so the rule would hit both and double the padding. */
+.terminal-pane { flex: 1; min-height: 0; background: #14161a; overflow: hidden; }
+/* Padding lives on the xterm element, not the pane: FitAddon subtracts the xterm element's padding but not its parent's. */
+.terminal-pane .xterm { padding: 6px 0 6px 10px; }
+.terminal-pane .xterm-viewport { background-color: transparent !important; }
+.placeholder { margin: auto; color: #6f7682; }
+.overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; }
+.dialog { width: 520px; background: #1d2026; border: 1px solid #353a44; border-radius: 12px; padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+.dialog h2 { margin: 0; font-size: 15px; }
+.dialog label { display: flex; flex-direction: column; gap: 4px; color: #8b929e; }
+.row { display: flex; gap: 8px; }
+.row.end { justify-content: flex-end; }
+.recent { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font-size: 12px; padding: 2px 8px; border-radius: 10px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip.active { border-color: #2f6feb; }
+.error { color: #ff8a80; margin: 0; }
+
+.badge.attention { background: #b3261e; color: #fff; font-weight: 600; }
+.badge.idle { background: #3a3f4a; color: #b8c0cc; }
+.attention-panel { padding: 8px 14px; background: #262a32; border-bottom: 1px solid #2a2e36; }
+.attention-panel.prompt { background: #3a1d1d; border-bottom-color: #6f2a2a; }
+.attention-head { color: #ffc9c4; font-weight: 600; margin-bottom: 4px; }
+.attention-panel:not(.prompt) .attention-head { color: #b8c0cc; }
+.attention-panel pre { margin: 0 0 8px; white-space: pre-wrap; font: 12px Menlo, Monaco, monospace; max-height: 180px; overflow: auto; }
+.attention-panel .row { align-items: center; flex-wrap: wrap; }
+.toasts { position: fixed; top: 44px; right: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 10; }
+.toast { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; max-width: 360px; text-align: left; background: #3a1d1d; border-color: #b3261e; }
+.toast span { color: #d7dae0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.sessions::-webkit-scrollbar, .attention-panel pre::-webkit-scrollbar { width: 8px; }
+.sessions::-webkit-scrollbar-thumb, .attention-panel pre::-webkit-scrollbar-thumb { background: #353a44; border-radius: 4px; }

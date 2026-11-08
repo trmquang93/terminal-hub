@@ -1,0 +1,64 @@
+{
+  "name": "terminal-hub",
+  "version": "0.1.0",
+  "description": "macOS terminal host with persistent sessions and a local control API",
+  "private": true,
+  "main": "dist/main/main.js",
+  "bin": {
+    "hub": "bin/hub"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.json --noEmit && vite build",
+    "start": "npm run build && electron .",
+    "package:app": "npm run build && node scripts/build-cli.mjs && electron-builder --mac dir --arm64",
+    "install:app": "npm run package:app && node scripts/install-app.mjs",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "postinstall": "node scripts/postinstall.mjs"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.1.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.2.1",
+    "electron": "^45.2.3",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.14.0",
+    "globals": "^17.14.0",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.72.1",
+    "vite": "^8.3.6",
+    "vitest": "^5.1.0"
+  },
+  "build": {
+    "appId": "com.quangtran.terminalhub",
+    "productName": "Terminal Hub",
+    "directories": { "output": "release" },
+    "npmRebuild": false,
+    "files": [
+      "dist/**/*",
+      "!dist/**/*.map",
+      "!dist/cli",
+      "node_modules/node-pty/**/*",
+      "!node_modules/node-pty/{deps,src,third_party,scripts,typings}",
+      "!node_modules/node-pty/prebuilds/{darwin-x64,win32-arm64,win32-x64}",
+      "!node_modules/{react,react-dom,scheduler,@xterm}/**/*"
+    ],
+    "asarUnpack": ["node_modules/node-pty/**"],
+    "extraResources": [{ "from": "build/hub", "to": "hub" }],
+    "mac": { "target": "dir", "identity": null, "category": "public.app-category.developer-tools", "icon": "assets/icon.icns" }
+  },
+  "allowScripts": {
+    "node-pty": false,
+    "fsevents": false
+  }
+}
