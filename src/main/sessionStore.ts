@@ -84,7 +84,7 @@ export class SessionStore {
       argv: raw.argv ?? [],
       env: raw.env ?? {},
       state,
-      claude: raw.claude ?? null,
+      claude: raw.claude ? { ...raw.claude, provider: raw.claude.provider === 'opencode' ? 'opencode' : 'claude' } : null,
       resumeCount: raw.resumeCount ?? 0,
       autoAnswer: raw.autoAnswer ?? null,
       startedAt,

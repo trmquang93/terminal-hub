@@ -1,11 +1,12 @@
 /** `restored` is reserved: a resumed session reports `running` while live. */
 export type SessionState = 'running' | 'exited' | 'interrupted' | 'restored';
 
-export interface ClaudeInfo {
+export interface AgentInfo {
+  provider: 'claude' | 'opencode';
   configDir: string;
-  /** Claude Code session uuid; null until discovered. */
+  /** Claude Code session uuid or opencode ses_ id; null until discovered. */
   sessionId: string | null;
-  /** Full argv with `--resume {{sessionId}}` after the claude token. */
+  /** Full argv with `--resume {{sessionId}}` (claude) or `--session {{sessionId}}` (opencode) after the tool token. */
   argvTemplate: string[];
   resumeCommand: string;
 }
@@ -48,7 +49,8 @@ export interface SessionMeta {
   argv: string[];
   env: Record<string, string>;
   state: SessionState;
-  claude: ClaudeInfo | null;
+  /** The agent slot for both providers (Claude Code and opencode); the name is kept for on-disk compatibility. */
+  claude: AgentInfo | null;
   resumeCount: number;
   autoAnswer: AutoAnswerPolicy | null;
   startedAt: string;

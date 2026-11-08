@@ -7,6 +7,7 @@ import type { AnswerRequest, AttentionInfo, OutputSlice, SessionInfo, SessionMet
 import { AttentionTracker, resolveAnswer, SAFE_UNATTENDED_POLICY } from './attention';
 import { discoverSessionId, fillTemplate, planClaudeLaunch, renderCommand, SESSION_PLACEHOLDER, transcriptExists } from './claude';
 import { HubError } from './errors';
+import { discoverOpencodeSessionId, opencodeSessionExists, planOpencodeLaunch } from './opencode';
 import type { OutputChunk, SessionService } from './service';
 import type { SessionStore } from './sessionStore';
 
@@ -164,17 +165,17 @@ export class SessionManager implements SessionService {
   start(options: StartSessionOptions): SessionInfo {
     const args = options.args ?? [];
     const env = options.env ?? {};
-    const claudePlan = planClaudeLaunch(options.command, args, env, this.baseEnv());
-    const label = claudePlan ? 'claude' : basename(options.command);
+    const plan = planClaudeLaunch(options.command, args, env, this.baseEnv()) ?? planOpencodeLaunch(options.command, args, env, this.baseEnv());
+    const label = plan?.claude.provider ?? basename(options.command);
     const meta: SessionMeta = {
       id: randomUUID(),
       title: options.title?.trim() || `${label} — ${basename(options.cwd) || options.cwd}`,
       cwd: options.cwd,
       command: options.command,
-      argv: claudePlan?.args ?? args,
-      env: claudePlan?.env ?? env,
+      argv: plan?.args ?? args,
+      env: plan?.env ?? env,
       state: 'running',
-      claude: claudePlan?.claude ?? null,
+      claude: plan?.claude ?? null,
       resumeCount: 0,
       autoAnswer: options.autoAnswer ?? (options.unattended ? SAFE_UNATTENDED_POLICY : null),
       startedAt: new Date().toISOString(),
@@ -199,17 +200,23 @@ export class SessionManager implements SessionService {
     return this.info(meta);
   }
 
-  /** Relaunches a finished session in place: `--resume <uuid>` for Claude Code, the original command otherwise. */
+  /** Relaunches a finished session in place: `--resume <uuid>` for Claude Code, `--session <id>` for opencode, the original command otherwise. */
   resume(id: string): SessionInfo {
     const meta = this.require(id);
     if (this.live.has(id)) throw new HubError(409, 'session is already running');
     let args = meta.argv;
     if (meta.claude) {
-      if (meta.claude.sessionId === null) throw new HubError(400, 'no Claude session id recorded for this session; cannot resume');
-      const { argvTemplate, sessionId, configDir } = meta.claude;
-      // Claude writes the transcript after the first turn; before that there is nothing to resume, so reuse the id fresh.
-      const template = transcriptExists(configDir, meta.cwd, sessionId) ? argvTemplate : argvTemplate.flatMap((token, i) => (token === '--resume' && argvTemplate[i + 1] === SESSION_PLACEHOLDER ? ['--session-id'] : [token]));
-      args = fillTemplate(template, sessionId).slice(1);
+      const { argvTemplate, sessionId, configDir, provider } = meta.claude;
+      if (sessionId === null) throw new HubError(400, `no ${provider === 'opencode' ? 'opencode' : 'Claude'} session id recorded for this session; cannot resume`);
+      if (provider === 'opencode') {
+        const at = argvTemplate.indexOf(SESSION_PLACEHOLDER);
+        const template = opencodeSessionExists(configDir, sessionId) ? argvTemplate : [...argvTemplate.slice(0, at - 1), ...argvTemplate.slice(at + 1)];
+        args = fillTemplate(template, sessionId).slice(1);
+      } else {
+        // Claude writes the transcript after the first turn; before that there is nothing to resume, so reuse the id fresh.
+        const template = transcriptExists(configDir, meta.cwd, sessionId) ? argvTemplate : argvTemplate.flatMap((token, i) => (token === '--resume' && argvTemplate[i + 1] === SESSION_PLACEHOLDER ? ['--session-id'] : [token]));
+        args = fillTemplate(template, sessionId).slice(1);
+      }
     }
     const previous = { ...meta };
     Object.assign(meta, { state: 'running', endedAt: null, exitCode: null, signal: null, resumeCount: meta.resumeCount + 1 });
@@ -305,7 +312,8 @@ export class SessionManager implements SessionService {
     const claude = meta.claude;
     if (claude?.sessionId !== null || !claude) return;
     const taken = new Set([...this.sessions.values()].flatMap((other) => (other.claude?.sessionId ? [other.claude.sessionId] : [])));
-    const sessionId = discoverSessionId(claude.configDir, meta.cwd, Date.parse(meta.startedAt), taken);
+    const since = Date.parse(meta.startedAt);
+    const sessionId = claude.provider === 'opencode' ? discoverOpencodeSessionId(claude.configDir, meta.cwd, since, taken) : discoverSessionId(claude.configDir, meta.cwd, since, taken);
     if (sessionId === null) return;
     claude.sessionId = sessionId;
     claude.resumeCommand = renderCommand(fillTemplate(claude.argvTemplate, sessionId));

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
-import type { ClaudeInfo } from '../shared/types';
+import type { AgentInfo } from '../shared/types';
 
 export const SESSION_PLACEHOLDER = '{{sessionId}}';
 
@@ -23,22 +23,27 @@ function isClaudeName(token: string): boolean {
 }
 
 /**
- * Index of the Claude Code token in [command, ...args], or -1. Only leading
- * wrapper tokens (env, npx, VAR=value, flags) may precede it, so
+ * Index of the first token in [command, ...args] whose name `isName` accepts, or -1.
+ * Only leading wrapper tokens (env, npx, VAR=value, flags) may precede it, so
  * `echo claude` is not a match.
  */
-export function findClaudeIndex(argv: readonly string[]): number {
+export function findCommandIndex(argv: readonly string[], isName: (token: string) => boolean): number {
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i] ?? '';
     const previous = argv[i - 1] ?? '';
-    if (isClaudeName(token) && !PACKAGE_FLAGS.has(previous)) return i;
+    if (isName(token) && !PACKAGE_FLAGS.has(previous)) return i;
     const skippable = i === 0 ? WRAPPERS.has(basename(token)) : token.startsWith('-') || ASSIGNMENT_RE.test(token) || WRAPPERS.has(token) || PACKAGE_FLAGS.has(previous);
     if (!skippable) return -1;
   }
   return -1;
 }
 
-function assignmentsBefore(argv: readonly string[], end: number): Record<string, string> {
+/** Index of the Claude Code token in [command, ...args], or -1. */
+export function findClaudeIndex(argv: readonly string[]): number {
+  return findCommandIndex(argv, isClaudeName);
+}
+
+export function assignmentsBefore(argv: readonly string[], end: number): Record<string, string> {
   const found: Record<string, string> = {};
   for (const token of argv.slice(0, end)) {
     const match = ASSIGNMENT_RE.exec(token);
@@ -64,7 +69,7 @@ export interface ClaudeLaunch {
   args: string[];
   /** Env overrides to record so a resume runs with the exact same config dir. */
   env: Record<string, string>;
-  claude: ClaudeInfo;
+  claude: AgentInfo;
 }
 
 /**
@@ -121,7 +126,7 @@ export function planClaudeLaunch(
   return {
     args: launchArgs,
     env: pinned,
-    claude: { configDir, sessionId, argvTemplate: template, resumeCommand: sessionId === null ? '' : renderCommand(fillTemplate(template, sessionId)) },
+    claude: { provider: 'claude', configDir, sessionId, argvTemplate: template, resumeCommand: sessionId === null ? '' : renderCommand(fillTemplate(template, sessionId)) },
   };
 }
 

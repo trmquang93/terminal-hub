@@ -3,14 +3,15 @@ import { parseCommandLine } from '../shared/commandLine';
 import type { HubDefaults, StartSessionOptions } from '../shared/types';
 import { baseName, shortenPath } from './format';
 
-type Preset = 'shell' | 'claude' | 'codex' | 'custom';
+type Preset = 'shell' | 'claude' | 'codex' | 'opencode' | 'custom';
 
-const PRESET_LABELS: Record<Preset, string> = { shell: 'Login shell', claude: 'Claude Code (claude)', codex: 'Codex (codex)', custom: 'Custom command…' };
+const PRESET_LABELS: Record<Preset, string> = { shell: 'Login shell', claude: 'Claude Code (claude)', codex: 'Codex (codex)', opencode: 'OpenCode (opencode)', custom: 'Custom command…' };
 
 function buildCommand(preset: Preset, custom: string, shell: string): { command: string; args: string[] } | null {
   if (preset === 'shell') return { command: shell, args: ['-l'] };
   if (preset === 'claude') return { command: 'claude', args: [] };
   if (preset === 'codex') return { command: 'codex', args: [] };
+  if (preset === 'opencode') return { command: 'opencode', args: [] };
   return parseCommandLine(custom, shell);
 }
 

@@ -46,6 +46,16 @@ A command that runs `claude` (directly, via `env`, an absolute path, `npx …`) 
 `hub resume`) relaunches in the same entry with `claude --resume <uuid>` and the same cwd/env, appending to the same
 `output.log` after a `── resumed … ──` line. Other commands get **Restart**. Nothing is ever resumed automatically.
 
+## OpenCode sessions
+
+The **OpenCode (opencode)** preset starts `opencode`; the same detection covers `env`, an absolute path, `npx opencode-ai …`.
+opencode cannot be given a session id at launch and creates none until the first message is sent, so `meta.claude.sessionId`
+stays empty until then: the app polls opencode's SQLite store (`$XDG_DATA_HOME/opencode/opencode.db`, default
+`~/.local/share/opencode/opencode.db`, read with the system `sqlite3`) for the newest top-level session created in the same
+cwd, and records its `ses_…` id. **Resume** relaunches with `opencode --session <id>` and the same cwd/env. Until an id exists
+(no message sent yet) the session cannot be resumed. A user `-s/--session` or `-c/--continue` in the command is stripped
+from the resume command.
+
 The app never edits Claude's settings (`settings.json`, hooks): attention is detected from the screen text alone.
 
 ## Needs attention

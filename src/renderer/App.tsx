@@ -62,7 +62,7 @@ function SessionRow({ session, home, selected, onSelect, onDelete }: { session: 
       <div className="meta">
         <Badge session={session} />
         <AttentionBadge session={session} />
-        {session.claude && <span className="badge tag">claude</span>}
+        {session.claude && <span className="badge tag">{session.claude.provider}</span>}
       </div>
       <div className="times">
         started {formatTime(session.startedAt)}
@@ -134,7 +134,7 @@ function Banner({ session }: { session: SessionInfo }) {
       : `Process ended${session.signal !== null ? ` (signal ${session.signal})` : ` with exit code ${session.exitCode ?? '?'}`} at ${formatTime(session.endedAt)}.`;
   return (
     <div className={session.state === 'interrupted' ? 'banner interrupted' : 'banner'}>
-      <span>{message}{blocked && ' No Claude session id was found, so it cannot be resumed.'}</span>
+      <span>{message}{blocked && ` No ${session.claude?.provider === 'opencode' ? 'opencode' : 'Claude'} session id was found, so it cannot be resumed.`}</span>
       <button className="primary" disabled={blocked} onClick={() => void window.hub.resumeSession(session.id).catch((error: unknown) => alert(String(error)))}>
         {label}
       </button>
