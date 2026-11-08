@@ -59,6 +59,39 @@ describe('planClaudeLaunch', () => {
     expect(launch?.claude.sessionId).toBe(OTHER);
   });
 
+  describe('hub hook settings (--settings)', () => {
+    const FILE = '/data/claude-hooks.json';
+    const withFile = (command: string, args: string[]) => planClaudeLaunch(command, args, {}, {}, () => ID, FILE);
+
+    it('adds --settings <file> to the spawn args and to the resume command and template', () => {
+      const launch = withFile('claude', ['--model', 'opus']);
+      expect(launch?.args).toEqual(['--session-id', ID, '--model', 'opus', '--settings', FILE]);
+      expect(launch?.claude.argvTemplate).toEqual(['claude', '--resume', '{{sessionId}}', '--model', 'opus', '--settings', FILE]);
+      expect(launch?.claude.resumeCommand).toBe(`claude --resume ${ID} --model opus --settings ${FILE}`);
+      expect(launch?.claude.sessionId).toBe(ID);
+      expect(launch?.settingsSkipped).toBe(false);
+    });
+
+    it('keeps the flag before a -- terminator and inside an env wrapper', () => {
+      expect(withFile('claude', ['--', 'fix it'])?.args).toEqual(['--session-id', ID, '--settings', FILE, '--', 'fix it']);
+      expect(withFile('env', ['A=1', 'claude'])?.args).toEqual(['A=1', 'claude', '--session-id', ID, '--settings', FILE]);
+    });
+
+    it.each([[['--settings', '/mine.json']], [['--settings=/mine.json']]])('skips injection when the user passed %j', (args) => {
+      const launch = withFile('claude', args);
+      expect(launch?.args).toEqual(['--session-id', ID, ...args]);
+      expect(launch?.claude.resumeCommand).not.toContain(FILE);
+      expect(launch?.settingsSkipped).toBe(true);
+    });
+
+    it('still injects next to a user --resume, and adds nothing without a settings file or for non-Claude commands', () => {
+      expect(withFile('claude', ['--resume', OTHER])?.args).toEqual(['--resume', OTHER, '--settings', FILE]);
+      expect(plan('claude', [])?.args).toEqual(['--session-id', ID]);
+      expect(plan('claude', [])?.settingsSkipped).toBe(false);
+      expect(withFile('zsh', ['-l'])).toBeNull();
+    });
+  });
+
   it('leaves the id unknown for --continue so it can be discovered later', () => {
     const launch = plan('claude', ['--continue']);
     expect(launch?.args).toEqual(['--continue']);

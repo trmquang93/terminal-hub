@@ -4,8 +4,9 @@ import { accessSync, constants, statSync } from 'node:fs';
 import { basename, delimiter, join } from 'node:path';
 import * as pty from 'node-pty';
 import type { AnswerRequest, AttentionInfo, OutputSlice, SessionInfo, SessionMeta, StartSessionOptions } from '../shared/types';
+import { TurnTracker } from './agentState';
 import { AttentionTracker, resolveAnswer, SAFE_UNATTENDED_POLICY } from './attention';
-import { discoverSessionId, fillTemplate, planClaudeLaunch, renderCommand, SESSION_PLACEHOLDER, transcriptExists } from './claude';
+import { discoverSessionId, fillTemplate, findClaudeIndex, hasSettingsFlag, planClaudeLaunch, renderCommand, SESSION_PLACEHOLDER, transcriptExists, withSettings } from './claude';
 import { HubError } from './errors';
 import { discoverOpencodeSessionId, opencodeSessionExists, planOpencodeLaunch } from './opencode';
 import type { OutputChunk, SessionService } from './service';
@@ -23,6 +24,7 @@ interface Events {
   output: [OutputChunk];
   changed: [SessionInfo];
   attention: [SessionInfo];
+  turn: [SessionInfo];
   removed: [string];
 }
 
@@ -62,12 +64,18 @@ function clampDimension(value: number | undefined, fallback: number): number {
 export interface ManagerOptions {
   baseEnv?: () => NodeJS.ProcessEnv;
   attention?: { idleMs?: number; quietMs?: number };
+  /** Refreshes hub's Claude hook settings file and returns its path (null: inject nothing). Called before every Claude launch; must not throw. */
+  hooksFile?: () => string | null;
+  /** Diagnostics that are not errors (e.g. hook injection skipped). */
+  log?: (message: string) => void;
 }
 
 export interface HookNotification {
   hubSessionId?: string;
   sessionId?: string;
   message: string;
+  /** hook_event_name from Claude Code; absent from older callers, which only ever sent Notification. */
+  hookEvent?: string;
 }
 
 export class SessionManager implements SessionService {
@@ -77,6 +85,7 @@ export class SessionManager implements SessionService {
   private readonly killTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly discoveryTimers = new Map<string, ReturnType<typeof setInterval>>();
   private readonly trackers = new Map<string, AttentionTracker>();
+  private readonly turns = new Map<string, TurnTracker>();
   private readonly baseEnv: () => NodeJS.ProcessEnv;
   private shuttingDown = false;
 
@@ -98,7 +107,7 @@ export class SessionManager implements SessionService {
   private info(meta: SessionMeta): SessionInfo {
     const running = this.live.has(meta.id);
     const resumable = !running && (meta.claude === null || meta.claude.sessionId !== null);
-    return { ...meta, running, resumable, attention: this.trackers.get(meta.id)?.attention ?? null };
+    return { ...meta, running, resumable, attention: this.trackers.get(meta.id)?.attention ?? null, turn: running ? (this.turns.get(meta.id)?.turn ?? null) : null };
   }
 
   list(): SessionInfo[] {
@@ -155,6 +164,12 @@ export class SessionManager implements SessionService {
     return () => this.emitter.off('attention', listener);
   }
 
+  /** Fires on every real change of a session's turn state (including back to null). */
+  onTurn(listener: (session: SessionInfo) => void): () => void {
+    this.emitter.on('turn', listener);
+    return () => this.emitter.off('turn', listener);
+  }
+
   onRemoved(listener: (id: string) => void): () => void {
     this.emitter.on('removed', listener);
     return () => this.emitter.off('removed', listener);
@@ -165,7 +180,10 @@ export class SessionManager implements SessionService {
   start(options: StartSessionOptions): SessionInfo {
     const args = options.args ?? [];
     const env = options.env ?? {};
-    const plan = planClaudeLaunch(options.command, args, env, this.baseEnv()) ?? planOpencodeLaunch(options.command, args, env, this.baseEnv());
+    const runsClaude = findClaudeIndex([options.command, ...args]) >= 0;
+    const claudePlan = planClaudeLaunch(options.command, args, env, this.baseEnv(), undefined, runsClaude ? (this.hooksFile() ?? undefined) : undefined);
+    if (claudePlan?.settingsSkipped) this.options.log?.(`claude hooks not injected: ${options.command} already has its own --settings`);
+    const plan = claudePlan ?? planOpencodeLaunch(options.command, args, env, this.baseEnv());
     const label = plan?.claude.provider ?? basename(options.command);
     const meta: SessionMeta = {
       id: randomUUID(),
@@ -215,7 +233,11 @@ export class SessionManager implements SessionService {
         args = fillTemplate(template, sessionId).slice(1);
       } else {
         // Claude writes the transcript after the first turn; before that there is nothing to resume, so reuse the id fresh.
-        const template = transcriptExists(configDir, meta.cwd, sessionId) ? argvTemplate : argvTemplate.flatMap((token, i) => (token === '--resume' && argvTemplate[i + 1] === SESSION_PLACEHOLDER ? ['--session-id'] : [token]));
+        let template = transcriptExists(configDir, meta.cwd, sessionId) ? argvTemplate : argvTemplate.flatMap((token, i) => (token === '--resume' && argvTemplate[i + 1] === SESSION_PLACEHOLDER ? ['--session-id'] : [token]));
+        // Sessions created before hooks were injected get them on their next resume.
+        const claudeIndex = findClaudeIndex(template);
+        const file = claudeIndex < 0 || hasSettingsFlag(template, claudeIndex) ? null : this.hooksFile();
+        if (file !== null) template = withSettings(template, claudeIndex, file);
         args = fillTemplate(template, sessionId).slice(1);
       }
     }
@@ -252,6 +274,7 @@ export class SessionManager implements SessionService {
       throw new HubError(400, `failed to start ${meta.command}: ${error instanceof Error ? error.message : String(error)}`);
     }
     this.live.set(meta.id, child);
+    this.turns.set(meta.id, new TurnTracker(() => this.live.has(meta.id) && this.emitTurn(meta)));
     this.trackers.set(
       meta.id,
       new AttentionTracker({
@@ -281,6 +304,21 @@ export class SessionManager implements SessionService {
     this.emitter.emit('attention', info);
   }
 
+  private emitTurn(meta: SessionMeta): void {
+    const info = this.info(meta);
+    this.emitter.emit('changed', info);
+    this.emitter.emit('turn', info);
+  }
+
+  private hooksFile(): string | null {
+    try {
+      return this.options.hooksFile?.() ?? null;
+    } catch (error) {
+      this.options.log?.(`claude hooks file failed: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
   private autoAnswer(meta: SessionMeta, keys: string, rule: string, promptText: string): void {
     this.store.appendAnswerLog(meta.id, { at: new Date().toISOString(), rule, keys, promptText });
     this.writeRaw(meta.id, keys);
@@ -295,6 +333,7 @@ export class SessionManager implements SessionService {
     this.discoveryTimers.delete(meta.id);
     this.trackers.get(meta.id)?.stop();
     this.trackers.delete(meta.id);
+    this.turns.delete(meta.id);
     this.store.close(meta.id);
     Object.assign(meta, {
       state: this.shuttingDown ? 'interrupted' : 'exited',
@@ -370,7 +409,9 @@ export class SessionManager implements SessionService {
       candidates.find((candidate) => candidate.id === notification.hubSessionId) ??
       candidates.find((candidate) => notification.sessionId !== undefined && candidate.claude?.sessionId === notification.sessionId);
     if (!meta) return false;
-    this.trackers.get(meta.id)?.hook(notification.message);
+    // A Notification (or a caller that predates hookEvent) is a question for the person; every event also moves the turn state.
+    if (notification.hookEvent === undefined || notification.hookEvent === 'Notification') this.trackers.get(meta.id)?.hook(notification.message);
+    this.turns.get(meta.id)?.hook(notification.hookEvent ?? 'Notification', notification.message);
     return true;
   }
 

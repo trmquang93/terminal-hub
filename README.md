@@ -95,7 +95,37 @@ cwd, and records its `ses_…` id. **Resume** relaunches with `opencode --sessio
 (no message sent yet) the session cannot be resumed. A user `-s/--session` or `-c/--continue` in the command is stripped
 from the resume command.
 
-The app never edits Claude's settings (`settings.json`, hooks): attention is detected from the screen text alone.
+The app never edits Claude's own settings: your `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`) is never touched.
+Hooks are injected per launch with `--settings`, see below.
+
+## Agent status (iTerm-style hooks)
+
+Like iTerm2's `cc-status`, hub follows each Claude Code session's turn through Claude's hook events. It owns the hooks:
+the app writes `claude-hooks.json` in its data dir (at start and before every Claude launch) and starts Claude with
+`--settings <dataDir>/claude-hooks.json`, also in the stored resume command. Claude merges it with your own settings, so your
+hooks keep running. If your command already has `--settings`, hub injects nothing (a line goes to `notifications.log`).
+Your `~/.claude/settings.json` is never edited. Sessions created before this feature get the flag on their next resume.
+
+Each hook runs `hub hook-notify` (stdin JSON → `POST /hooks/claude`, 2 s timeout, never blocks Claude). The command is the first
+that exists: `/opt/homebrew/bin/hub`, the app's bundled `hub`, then `node build/hub/hub.cjs` / `node dist/cli/hub.js` of the repo.
+With none, the file is still written (no hooks) and a `WARN` goes to `notifications.log`.
+
+`turn: { state, since } | null` on every session (`GET /sessions`, `/events`, a chip in the list):
+
+| state | from hook events |
+| --- | --- |
+| `working` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop` |
+| `waiting` | `PermissionRequest`, `Notification` (Claude's idle "waiting for your input" reminder is ignored: the turn is still `done`) |
+| `done` | `Stop`, `StopFailure` |
+| `null` | before the first event, after `SessionEnd`, and whenever the process is not running |
+
+The same state twice changes nothing: no event, same `since`.
+
+The webhook also gets `{ "event": "turn", "turn": "working"|"waiting"|"done", "session": { "id", "title", "cwd", "command" }, "since": "…" }`
+once per real transition, in order, one at a time per session, with no prompt text and no token. `attention` and `resolved` are unchanged.
+
+`hub watch` prints `attention`, `turn` and `exit` events from `/events` as JSON lines (`{"event":"turn","id":…,"turn":{…}}`)
+until Ctrl-C (exit 0).
 
 ## Needs attention
 
@@ -132,7 +162,7 @@ up and reply with `hub answer <id> …` instead of polling. Create `~/Library/Ap
 }
 ```
 
-  `event` is `attention` or `resolved`. `resolved` repeats the question that was reported (same `since`) and the session's
+  `event` is `attention` or `resolved` (or `turn`, see above). `resolved` repeats the question that was reported (same `since`) and the session's
   current `state` (`exited` when the process ended). Only these fields are sent: never the API token (also scrubbed from the
   question text), `api.json`, env, argv or the output. `promptText` is the last ~10 plain-text lines, capped at 4000 chars.
 - **When:** once per question. `attention` goes out when a `prompt` has been on screen for 1 s (redraws and blinking do not
@@ -150,7 +180,7 @@ up and reply with `hub answer <id> …` instead of polling. Create `~/Library/Ap
 ## HTTP API (127.0.0.1, `Authorization: Bearer <token>` except `/health`)
 
 `GET /health` · `GET /sessions[?attention=1]` (includes archived sessions; each has `archived`) · `POST /sessions` · `GET /sessions/:id` · `GET …/output?offset&limit` · `GET …/text?offset` ·
-`GET …/stream` (SSE) · `GET /events` (SSE: attention + exit) · `POST …/input` · `POST …/answer` · `POST …/stop` · `POST …/resume` ·
+`GET …/stream` (SSE) · `GET /events` (SSE: attention + turn + exit) · `POST …/input` · `POST …/answer` · `POST …/stop` · `POST …/resume` ·
 `POST …/title` · `POST …/archive` `{ "archived": true|false }` (returns the session; 400 while it runs) · `DELETE /sessions/:id` ·
 `POST /sessions/delete` `{ "ids": [...] }` (no confirmation; kills running ones; 404 and nothing deleted if an id is unknown) · `POST /hooks/claude`
 
@@ -163,5 +193,6 @@ hub text <id> [--follow] | send <id> "text" | stop <id> | rm <id> | resume <id> 
 hub archive <id> | unarchive <id>
 hub wait <id> [--timeout S]     exit 10 on attention (prints the question), child's code on exit, 124 on timeout
 hub answer <id> yes|no|enter|esc|tab|up|down|1-9|<text>
+hub watch                       stream attention / turn / exit events as JSON lines (Ctrl-C exits 0)
 hub notify-test                 send one synthetic attention event to the webhook in notify.json
 ```

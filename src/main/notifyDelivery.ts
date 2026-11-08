@@ -1,6 +1,6 @@
 import { appendFileSync, renameSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AttentionInfo, SessionInfo } from '../shared/types';
+import type { AttentionInfo, SessionInfo, TurnInfo } from '../shared/types';
 import { loadNotifyConfig, type NotifyConfig } from './notifyConfig';
 
 export const NOTIFY_TIMEOUT_MS = 5000;
@@ -12,7 +12,7 @@ const MAX_PROMPT_CHARS = 4000;
 
 export type NotifyEventName = 'attention' | 'resolved';
 
-export interface NotifyEvent {
+export interface AttentionEvent {
   event: NotifyEventName;
   session: {
     id: string;
@@ -27,11 +27,25 @@ export interface NotifyEvent {
   };
 }
 
+/** Sent once per real turn transition of a Claude Code session (working, waiting, done); carries no prompt or tool text. */
+export interface TurnEvent {
+  event: 'turn';
+  turn: TurnInfo['state'];
+  session: { id: string; title: string; cwd: string; command: string };
+  since: string;
+}
+
+export type NotifyEvent = AttentionEvent | TurnEvent;
+
+export function buildTurnEvent(session: Pick<SessionInfo, 'id' | 'title' | 'cwd' | 'command'>, turn: TurnInfo): TurnEvent {
+  return { event: 'turn', turn: turn.state, session: { id: session.id, title: session.title, cwd: session.cwd, command: session.command }, since: turn.since };
+}
+
 /**
  * The payload is built field by field from an allow-list: metadata and the detected question only. `secrets` (the app's API
  * token, the webhook bearer) are scrubbed from the question text in case the screen ever shows one.
  */
-export function buildEvent(event: NotifyEventName, session: Pick<SessionInfo, 'id' | 'title' | 'cwd' | 'command' | 'state'>, attention: AttentionInfo, secrets: readonly string[] = []): NotifyEvent {
+export function buildEvent(event: NotifyEventName, session: Pick<SessionInfo, 'id' | 'title' | 'cwd' | 'command' | 'state'>, attention: AttentionInfo, secrets: readonly string[] = []): AttentionEvent {
   let promptText = attention.promptText;
   for (const secret of secrets) if (secret.length >= 8) promptText = promptText.replaceAll(secret, '[redacted]');
   return {

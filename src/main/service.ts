@@ -15,7 +15,7 @@ export interface SessionService {
   resume(id: string): SessionInfo;
   write(id: string, data: string): void;
   answer(id: string, request: AnswerRequest): string;
-  hookNotify(notification: { hubSessionId?: string; sessionId?: string; message: string }): boolean;
+  hookNotify(notification: { hubSessionId?: string; sessionId?: string; message: string; hookEvent?: string }): boolean;
   stop(id: string): void;
   remove(id: string): Promise<void>;
   removeMany(ids: string[]): Promise<void>;
@@ -26,5 +26,6 @@ export interface SessionService {
   readOutput(id: string, offset: number, limit: number): Promise<Buffer>;
   onOutput(listener: (chunk: OutputChunk) => void): () => void;
   onAttention(listener: (session: SessionInfo) => void): () => void;
+  onTurn(listener: (session: SessionInfo) => void): () => void;
   onChanged(listener: (session: SessionInfo) => void): () => void;
 }

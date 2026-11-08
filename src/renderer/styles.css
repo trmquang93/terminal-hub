@@ -76,6 +76,9 @@ input, select { background: #1d2026; border: 1px solid #353a44; border-radius: 6
 
 .badge.attention { background: #b3261e; color: #fff; font-weight: 600; }
 .badge.idle { background: #3a3f4a; color: #b8c0cc; }
+.badge.turn-working { background: #1f3a5f; color: #bcd6ff; }
+.badge.turn-waiting { background: #7a5a14; color: #ffe2a0; }
+.badge.turn-done { background: #1f6f3f; color: #b8f5cf; }
 .attention-panel { padding: 8px 14px; background: #262a32; border-bottom: 1px solid #2a2e36; }
 .attention-panel.prompt { background: #3a1d1d; border-bottom-color: #6f2a2a; }
 .attention-head { color: #ffc9c4; font-weight: 600; margin-bottom: 4px; }

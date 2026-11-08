@@ -6,6 +6,7 @@ import { createApiServer, listenOnLoopback } from './apiServer';
 import { loadOrCreateToken, removeApiFile, writeApiFile } from './apiFile';
 import { NotificationThrottle } from './attention';
 import { AttentionNotifier } from './attentionNotifier';
+import { createHookRefresher } from './claudeHooks';
 import { loadNotifyConfig } from './notifyConfig';
 import { createSender, NotifyLog } from './notifyDelivery';
 import { dataDir } from './paths';
@@ -167,9 +168,15 @@ function createWindow(): void {
 async function startServices(): Promise<void> {
   const loginPath = await loginShellPath(defaultShell());
   const baseEnv = (): NodeJS.ProcessEnv => ({ ...process.env, PATH: [loginPath, process.env.PATH].filter(Boolean).join(':') });
-  manager = new SessionManager(new SessionStore(join(dir, 'sessions')), app.getVersion(), { baseEnv });
-  const token = loadOrCreateToken(dir);
   const notifyLog = new NotifyLog(dir);
+  const hooksFile = createHookRefresher(
+    dir,
+    () => ({ repoRoot: join(__dirname, '..', '..'), resourcesPath: app.isPackaged ? process.resourcesPath : undefined, searchPath: baseEnv().PATH }),
+    (level, message) => notifyLog.write(level, message),
+  );
+  hooksFile();
+  manager = new SessionManager(new SessionStore(join(dir, 'sessions')), app.getVersion(), { baseEnv, hooksFile, log: (message) => notifyLog.write('INFO', message) });
+  const token = loadOrCreateToken(dir);
   notifier = new AttentionNotifier({
     send: createSender(dir, notifyLog),
     secrets: () => [token, loadNotifyConfig(dir).config?.bearer ?? ''],

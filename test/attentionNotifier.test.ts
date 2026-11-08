@@ -4,10 +4,10 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AttentionNotifier, SETTLE_MS } from '../src/main/attentionNotifier';
 import { SAFE_UNATTENDED_POLICY } from '../src/main/attention';
-import type { NotifyEvent } from '../src/main/notifyDelivery';
+import type { AttentionEvent, NotifyEvent, TurnEvent } from '../src/main/notifyDelivery';
 import { SessionManager } from '../src/main/sessionManager';
 import { SessionStore } from '../src/main/sessionStore';
-import type { AttentionInfo, SessionInfo } from '../src/shared/types';
+import type { AttentionInfo, SessionInfo, TurnInfo } from '../src/shared/types';
 
 const prompt = (since: string, promptText = 'Continue? [y/N]'): AttentionInfo => ({ reason: 'prompt', promptText, since, source: 'heuristic' });
 
@@ -34,6 +34,7 @@ function session(overrides: Partial<SessionInfo> = {}): SessionInfo {
     appVersion: 'test',
     running: true,
     attention: null,
+    turn: null,
     resumable: false,
     ...overrides,
   };
@@ -52,6 +53,46 @@ describe('AttentionNotifier', () => {
   afterEach(() => vi.useRealTimers());
 
   const settle = async (): Promise<void> => void (await vi.advanceTimersByTimeAsync(SETTLE_MS + 10));
+
+  const turn = (state: TurnInfo['state'], since: string): TurnInfo => ({ state, since });
+
+  it('sends one turn event per real transition, with an allow-listed payload and no prompt text or token', async () => {
+    notifier.update(session({ turn: turn('working', 't1') }));
+    notifier.update(session({ turn: turn('working', 't1'), bytesWritten: 5 })); // unrelated change: nothing
+    notifier.update(session({ turn: turn('waiting', 't2'), attention: prompt('t2', 'Continue? api-token-123456') }));
+    notifier.update(session({ turn: turn('waiting', 't2') }));
+    notifier.update(session({ turn: turn('working', 't3') }));
+    notifier.update(session({ turn: turn('done', 't4') }));
+    await vi.advanceTimersByTimeAsync(0);
+    const turns = sent.filter((e) => e.event === 'turn');
+    expect(turns.map((e) => e.turn)).toEqual(['working', 'waiting', 'working', 'done']);
+    expect(turns[0]).toEqual({ event: 'turn', turn: 'working', since: 't1', session: { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', title: 'job', cwd: '/work', command: 'sh' } });
+    expect(JSON.stringify(turns)).not.toMatch(/api-token|Continue/);
+  });
+
+  it('does not repeat a turn after the session exits and its turn is cleared, and sends the next episode again', async () => {
+    notifier.update(session({ turn: turn('done', 't1') }));
+    notifier.update(session({ running: false, state: 'exited', turn: null }));
+    notifier.update(session({ running: false, state: 'exited', turn: null }));
+    notifier.update(session({ turn: turn('done', 't9') })); // resumed and finished again
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sent.map((e) => (e as TurnEvent).since)).toEqual(['t1', 't9']);
+  });
+
+  it('delivers turn events in order and never concurrently', async () => {
+    const log: string[] = [];
+    const slow = new AttentionNotifier({
+      send: async (event) => {
+        log.push(`start ${(event as TurnEvent).turn}`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        log.push(`end ${(event as TurnEvent).turn}`);
+      },
+    });
+    slow.update(session({ turn: turn('working', 't1') }));
+    slow.update(session({ turn: turn('done', 't2') }));
+    await vi.advanceTimersByTimeAsync(200);
+    expect(log).toEqual(['start working', 'end working', 'start done', 'end done']);
+  });
 
   it('sends one attention when a prompt appears and one resolved when it is gone', async () => {
     notifier.update(session({ attention: prompt('t1') }));
@@ -99,7 +140,7 @@ describe('AttentionNotifier', () => {
     notifier.update(session({ attention: prompt('t2', 'Overwrite? [y/N]') }));
     await settle();
     expect(summary()).toEqual(['attention', 'resolved', 'attention']);
-    expect(sent.map((e) => e.session.promptText)).toEqual(['Delete? [y/N]', 'Delete? [y/N]', 'Overwrite? [y/N]']);
+    expect(sent.map((e) => (e as AttentionEvent).session.promptText)).toEqual(['Delete? [y/N]', 'Delete? [y/N]', 'Overwrite? [y/N]']);
   });
 
   it('sends resolved at once when the session exits, with its final state', async () => {
@@ -108,7 +149,7 @@ describe('AttentionNotifier', () => {
     notifier.update(session({ running: false, state: 'exited', exitCode: 0, attention: null }));
     await vi.advanceTimersByTimeAsync(0);
     expect(summary()).toEqual(['attention', 'resolved']);
-    expect(sent[1]?.session.state).toBe('exited');
+    expect((sent[1] as AttentionEvent).session.state).toBe('exited');
   });
 
   it('sends nothing when a session exits before its prompt was reported', async () => {
@@ -233,7 +274,7 @@ describe('AttentionNotifier on a real SessionManager', () => {
     await new Promise((resolve) => setTimeout(resolve, 600)); // redraw window: no second attention
     expect(events.map((e) => e.event)).toEqual(['attention']);
     expect(events[0]?.session).toMatchObject({ id, title: 'asker', command: 'sh', reason: 'prompt' });
-    expect(events[0]?.session.promptText).toContain('Continue? [y/N]');
+    expect((events[0] as AttentionEvent).session.promptText).toContain('Continue? [y/N]');
     m.answer(id, { text: 'y', submit: true });
     await waitFor(2);
     expect(events.map((e) => e.event)).toEqual(['attention', 'resolved']);

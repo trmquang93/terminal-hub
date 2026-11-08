@@ -4,6 +4,7 @@ import type { SessionInfo } from '../shared/types';
 import { loadNotifyConfig, notifyConfigPath } from '../main/notifyConfig';
 import { buildEvent, deliver, NotifyLog } from '../main/notifyDelivery';
 import { apiFilePath, dataDir } from '../main/paths';
+import { formatWatchLine } from './watch';
 
 /** Set to `true` by scripts/build-cli.mjs for the copy bundled inside Terminal Hub.app. */
 declare const HUB_PACKAGED: boolean | undefined;
@@ -19,6 +20,7 @@ const USAGE = `usage:
   hub archive <id>                                    move a finished session to the Archived list (refused while it runs)
   hub unarchive <id>                                  move it back
   hub rm <id>                                         delete the session and its files
+  hub watch                                           stream attention, turn (working|waiting|done) and exit events as JSON lines until Ctrl-C
   hub notify-test                                     send one synthetic "attention" event to the endpoint in notify.json and print the HTTP result
   hub wait <id> [--timeout S]                         block until it needs attention (exit 10, prints the question) or exits (its code); 124 on timeout
   hub answer <id> <text|yes|no|enter|esc|tab|up|down|1-9> [--no-submit]
@@ -147,7 +149,7 @@ async function wait(api: Api, id: string, timeoutSeconds: number | null): Promis
       const payload = JSON.parse(data) as SessionInfo & ExitEvent;
       if (payload.id !== id) return false;
       if (event === 'exit') code = exitCodeOf(payload);
-      else if (payload.attention) {
+      else if (event === 'attention' && payload.attention) {
         console.log(describeAttention(payload));
         code = ATTENTION_EXIT_CODE;
       }
@@ -165,7 +167,25 @@ async function wait(api: Api, id: string, timeoutSeconds: number | null): Promis
   return code;
 }
 
-/** Claude Code Notification hook entry: forwards the notification to the app. Never fails or blocks Claude. */
+/** Prints every attention, turn and exit event as one JSON line, until Ctrl-C (exit 0) or the app goes away. */
+async function watch(api: Api): Promise<number> {
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => process.exit(0));
+  let response: Response;
+  try {
+    response = await fetch(`${api.baseUrl}/events`, { headers: { Authorization: `Bearer ${api.token}` } });
+  } catch {
+    throw notRunning();
+  }
+  if (!response.ok) throw new CliError(`error ${response.status}: ${response.statusText}`);
+  await readEvents(response, (event, data) => {
+    const line = formatWatchLine(event, data);
+    if (line !== null) process.stdout.write(`${line}\n`);
+    return false;
+  });
+  throw new CliError('event stream closed');
+}
+
+/** Claude Code hook entry: forwards the hook event to the app. Never fails or blocks Claude. */
 async function hookNotify(): Promise<void> {
   const hubSessionId = process.env.TERMINAL_HUB_SESSION_ID;
   if (!hubSessionId) return;
@@ -256,6 +276,8 @@ async function main(argv: string[]): Promise<number> {
   switch (command) {
     case 'run':
       return run(api, args);
+    case 'watch':
+      return watch(api);
     case 'ls': {
       const sessions = (await json<SessionInfo[]>(api, '/sessions')).sort((a, b) => a.startedAt.localeCompare(b.startedAt));
       const widths = [36, 12, 10, 9, 5, 20, 30, 0];

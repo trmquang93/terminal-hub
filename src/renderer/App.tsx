@@ -10,6 +10,10 @@ function AttentionBadge({ session }: { session: SessionInfo }) {
   return session.attention.reason === 'prompt' ? <span className="badge attention">needs input</span> : <span className="badge idle">idle</span>;
 }
 
+function TurnBadge({ session }: { session: SessionInfo }) {
+  return session.running && session.turn ? <span className={`badge turn-${session.turn.state}`}>{session.turn.state}</span> : null;
+}
+
 function Badge({ session }: { session: SessionInfo }) {
   if (session.running) return <span className="badge running">running</span>;
   if (session.state === 'interrupted') return <span className="badge interrupted">interrupted</span>;
@@ -78,6 +82,7 @@ function SessionRow({ session, selected, selectMode, checked, onSelect, onDelete
       <div className="meta">
         <Badge session={session} />
         <AttentionBadge session={session} />
+        <TurnBadge session={session} />
         {session.claude && <span className="badge tag">{session.claude.provider}</span>}
       </div>
       <div className="times">

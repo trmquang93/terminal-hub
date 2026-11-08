@@ -19,6 +19,14 @@ export interface AttentionInfo {
   source: 'hook' | 'heuristic' | 'idle';
 }
 
+export type TurnState = 'working' | 'waiting' | 'done';
+
+/** Where a Claude Code session is in its turn, from its hook events; `since` is when it entered this state. */
+export interface TurnInfo {
+  state: TurnState;
+  since: string;
+}
+
 export interface AutoAnswerRule {
   /** Exact, case-sensitive substring of the prompt text. */
   match: string;
@@ -68,6 +76,8 @@ export interface SessionMeta {
 export interface SessionInfo extends SessionMeta {
   running: boolean;
   attention: AttentionInfo | null;
+  /** Null until the first hook event, after SessionEnd, and whenever the process is not running. */
+  turn: TurnInfo | null;
   /** Not running and either a plain command (restart) or a Claude session with a known id. */
   resumable: boolean;
 }

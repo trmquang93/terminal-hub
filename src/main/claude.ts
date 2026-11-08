@@ -64,9 +64,30 @@ export function renderCommand(argv: readonly string[]): string {
   return argv.map(shellQuote).join(' ');
 }
 
+/** Tokens after the claude token, up to a `--` terminator. */
+function flagTokens(argv: readonly string[], claudeIndex: number): readonly string[] {
+  const rest = argv.slice(claudeIndex + 1);
+  const end = rest.indexOf('--');
+  return end < 0 ? rest : rest.slice(0, end);
+}
+
+/** True when the person already passed `--settings` (or `--settings=…`) to Claude Code. */
+export function hasSettingsFlag(argv: readonly string[], claudeIndex: number): boolean {
+  return flagTokens(argv, claudeIndex).some((token) => token === '--settings' || token.startsWith('--settings='));
+}
+
+/** `argv` with `--settings <file>` added after Claude's other flags (before a `--` terminator, so it stays a flag). */
+export function withSettings(argv: readonly string[], claudeIndex: number, file: string): string[] {
+  const end = argv.indexOf('--', claudeIndex + 1);
+  const at = end < 0 ? argv.length : end;
+  return [...argv.slice(0, at), '--settings', file, ...argv.slice(at)];
+}
+
 export interface ClaudeLaunch {
-  /** Args to spawn with (the original args, plus --session-id when injected). */
+  /** Args to spawn with (the original args, plus --session-id and --settings when injected). */
   args: string[];
+  /** True when hub's hook settings were not added because the argv already has its own --settings. */
+  settingsSkipped: boolean;
   /** Env overrides to record so a resume runs with the exact same config dir. */
   env: Record<string, string>;
   claude: AgentInfo;
@@ -74,7 +95,8 @@ export interface ClaudeLaunch {
 
 /**
  * Plans a launch of Claude Code: injects `--session-id <uuid>` so the id is
- * known up front. Returns null when the argv does not run Claude Code.
+ * known up front, and `--settings <settingsFile>` (hub's hooks) unless the argv has its own.
+ * Returns null when the argv does not run Claude Code.
  */
 export function planClaudeLaunch(
   command: string,
@@ -82,6 +104,7 @@ export function planClaudeLaunch(
   env: Record<string, string>,
   processEnv: Record<string, string | undefined>,
   newId: () => string = randomUUID,
+  settingsFile?: string,
 ): ClaudeLaunch | null {
   const argv = [command, ...args];
   const claudeIndex = findClaudeIndex(argv);
@@ -120,11 +143,17 @@ export function planClaudeLaunch(
     kept.push(token);
   }
 
-  const template = [...before, '--resume', SESSION_PLACEHOLDER, ...kept];
+  let template = [...before, '--resume', SESSION_PLACEHOLDER, ...kept];
   sessionId ??= continuing ? null : newId();
-  const launchArgs = sessionId === null || userResumed ? [...args] : [...before.slice(1), '--session-id', sessionId, ...kept];
+  let launchArgs = sessionId === null || userResumed ? [...args] : [...before.slice(1), '--session-id', sessionId, ...kept];
+  const settingsSkipped = settingsFile !== undefined && hasSettingsFlag(argv, claudeIndex);
+  if (settingsFile !== undefined && !settingsSkipped) {
+    template = withSettings(template, claudeIndex, settingsFile);
+    launchArgs = withSettings([command, ...launchArgs], claudeIndex, settingsFile).slice(1);
+  }
   return {
     args: launchArgs,
+    settingsSkipped,
     env: pinned,
     claude: { provider: 'claude', configDir, sessionId, argvTemplate: template, resumeCommand: sessionId === null ? '' : renderCommand(fillTemplate(template, sessionId)) },
   };

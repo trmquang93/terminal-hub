@@ -15,7 +15,7 @@ const LOG = Buffer.from('\x1b[1;34mdir\x1b[0m\r\nfile\r\n');
 
 function info(id: string, running: boolean): SessionInfo {
   return {
-    id, title: id.slice(0, 4), cwd: '/tmp', command: 'ls', argv: [], env: {}, state: running ? 'running' : 'exited', claude: null, resumeCount: 0, autoAnswer: null, archived: false, attention: null,
+    id, title: id.slice(0, 4), cwd: '/tmp', command: 'ls', argv: [], env: {}, state: running ? 'running' : 'exited', claude: null, resumeCount: 0, autoAnswer: null, archived: false, attention: null, turn: null,
     startedAt: '2026-01-01T00:00:00.000Z', endedAt: running ? null : '2026-01-01T00:00:01.000Z', exitCode: running ? null : 0, signal: null,
     cols: 80, rows: 24, bytesWritten: LOG.length, appVersion: 't', running, resumable: !running,
   };
@@ -27,6 +27,7 @@ const hooks: unknown[] = [];
 const removedMany: string[][] = [];
 const attentionListeners = new Set<(session: SessionInfo) => void>();
 const outputListeners = new Set<(chunk: OutputChunk) => void>();
+const turnListeners = new Set<(session: SessionInfo) => void>();
 const changedListeners = new Set<(session: SessionInfo) => void>();
 
 const service: SessionService = {
@@ -77,6 +78,10 @@ const service: SessionService = {
   onOutput: (listener) => {
     outputListeners.add(listener);
     return () => outputListeners.delete(listener);
+  },
+  onTurn: (listener) => {
+    turnListeners.add(listener);
+    return () => turnListeners.delete(listener);
   },
   onChanged: (listener) => {
     changedListeners.add(listener);
@@ -191,6 +196,39 @@ describe('API attention', () => {
     expect(JSON.parse((await post({ hubSessionId: RUNNING, message: 'needs permission' })).body)).toEqual({ ok: true, matched: true });
     expect(JSON.parse((await post({ hubSessionId: EXITED, message: 'x' })).body)).toEqual({ ok: true, matched: false });
     expect(hooks[0]).toMatchObject({ hubSessionId: RUNNING, message: 'needs permission' });
+  });
+
+  it('passes the hook_event_name through as hookEvent', async () => {
+    await request('/hooks/claude', { method: 'POST', headers: auth, body: JSON.stringify({ hubSessionId: RUNNING, hookEvent: 'PreToolUse', sessionId: 'abc' }) });
+    expect(hooks.at(-1)).toEqual({ hubSessionId: RUNNING, sessionId: 'abc', message: '', hookEvent: 'PreToolUse' });
+  });
+
+  it('streams turn events from /events: the current turn first, then changes, and GET /sessions carries turn', async () => {
+    const original = sessions[0] as SessionInfo;
+    const turn = (state: 'working' | 'done', since: string): SessionInfo => ({ ...original, turn: { state, since } });
+    sessions[0] = turn('working', 't1');
+    expect((JSON.parse((await request('/sessions', { headers: auth })).body) as SessionInfo[])[0]?.turn).toEqual({ state: 'working', since: 't1' });
+    const received = await new Promise<string>((resolve, reject) => {
+      let body = '';
+      const req = http.get({ host: '127.0.0.1', port, path: '/events', headers: auth }, (res) => {
+        res.on('data', (chunk: Buffer) => {
+          body += chunk.toString();
+          if (body.includes('"done"')) {
+            req.destroy();
+            resolve(body);
+          }
+        });
+      });
+      req.on('error', (error) => (body.includes('"done"') ? undefined : reject(error)));
+      setTimeout(() => {
+        for (const listener of turnListeners) listener(turn('done', 't2'));
+      }, 150);
+    });
+    sessions[0] = original;
+    const events = [...received.matchAll(/event: (\w+)\ndata: (.*)\n/g)].map((m) => ({ event: m[1], data: JSON.parse(m[2] ?? '{}') as Record<string, unknown> }));
+    expect(events.map((e) => e.event)).toEqual(['turn', 'turn']);
+    expect(events[0]?.data).toMatchObject({ id: RUNNING, turn: { state: 'working', since: 't1' } });
+    expect(events[1]?.data).toMatchObject({ id: RUNNING, turn: { state: 'done', since: 't2' } });
   });
 
   it('streams attention events from /events: sessions already waiting first, then changes and exits', async () => {

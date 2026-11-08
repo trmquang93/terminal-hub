@@ -163,13 +163,17 @@ export function createApiServer(options: ApiOptions): Server {
     }
   }
 
-  /** SSE of attention changes and exits for every session. Sessions already needing attention are sent first. */
+  /** SSE of attention changes, turn changes and exits for every session. Sessions already needing attention or in a turn state are sent first. */
   function streamEvents(res: ServerResponse): Promise<void> {
     res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-    const summary = (session: SessionInfo): unknown => ({ id: session.id, title: session.title, running: session.running, state: session.state, attention: session.attention });
+    const summary = (session: SessionInfo): unknown => ({ id: session.id, title: session.title, running: session.running, state: session.state, attention: session.attention, turn: session.turn });
     const send = (event: string, payload: unknown): void => void res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
-    for (const session of service.list()) if (session.attention) send('attention', summary(session));
+    for (const session of service.list()) {
+      if (session.attention) send('attention', summary(session));
+      if (session.turn) send('turn', summary(session));
+    }
     const offAttention = service.onAttention((session) => send('attention', summary(session)));
+    const offTurn = service.onTurn((session) => send('turn', summary(session)));
     const offChanged = service.onChanged((session) => {
       if (!session.running) send('exit', { ...(summary(session) as object), exitCode: session.exitCode, signal: session.signal });
     });
@@ -178,6 +182,7 @@ export function createApiServer(options: ApiOptions): Server {
       res.on('close', () => {
         clearInterval(heartbeat);
         offAttention();
+        offTurn();
         offChanged();
         resolve();
       });
@@ -202,7 +207,7 @@ export function createApiServer(options: ApiOptions): Server {
     if (url.pathname === '/hooks/claude' && method === 'POST') {
       const body = await readJson(req);
       const text = (key: string): string | undefined => (typeof body[key] === 'string' ? (body[key]) : undefined);
-      const matched = service.hookNotify({ hubSessionId: text('hubSessionId'), sessionId: text('sessionId'), message: text('message') ?? '' });
+      const matched = service.hookNotify({ hubSessionId: text('hubSessionId'), sessionId: text('sessionId'), message: text('message') ?? '', hookEvent: text('hookEvent') });
       return sendJson(res, 200, { ok: true, matched });
     }
 

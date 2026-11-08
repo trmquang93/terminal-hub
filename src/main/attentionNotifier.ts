@@ -1,6 +1,6 @@
-import type { AttentionInfo, SessionInfo } from '../shared/types';
+import type { AttentionInfo, SessionInfo, TurnInfo } from '../shared/types';
 import { matchingRule } from './attention';
-import { buildEvent, type NotifyEvent } from './notifyDelivery';
+import { buildEvent, buildTurnEvent, type NotifyEvent } from './notifyDelivery';
 
 /** A prompt must still be there (or still be gone) this long after it changed before the endpoint hears about it. */
 export const SETTLE_MS = 1000;
@@ -20,6 +20,8 @@ interface Tracked {
   want: AttentionInfo | null;
   /** The prompt the endpoint was last told about, until a `resolved` goes out. */
   told: AttentionInfo | null;
+  /** The turn state the endpoint was last told about; null after the session ends or its turn is cleared. */
+  turnTold: TurnInfo | null;
   latest: SessionInfo;
   timer: ReturnType<typeof setTimeout> | null;
   chain: Promise<unknown>;
@@ -32,7 +34,8 @@ function sameQuestion(a: AttentionInfo, b: AttentionInfo): boolean {
 
 /**
  * Turns the stream of session changes into webhook events, one `attention` per prompt and one `resolved` when it goes away
- * or the session exits. A change is held for `settleMs` first, so a prompt that appears and vanishes (a redraw) or is answered
+ * or the session exits, and one `turn` per real change of a Claude Code session's turn state (sent at once: hook events are
+ * discrete, there is nothing to settle). All of a session's events share one ordered queue. A change is held for `settleMs` first, so a prompt that appears and vanishes (a redraw) or is answered
  * by the auto-answer policy never reaches the endpoint. Only `prompt` attention counts; the 20 s `idle` fallback does not.
  */
 export class AttentionNotifier {
@@ -45,6 +48,7 @@ export class AttentionNotifier {
   update(session: SessionInfo): void {
     const state = this.state(session);
     state.latest = session;
+    this.noteTurn(state, session);
     const want = session.running && session.attention?.reason === 'prompt' ? session.attention : null;
     const episodeChanged = (want?.since ?? null) !== (state.want?.since ?? null);
     state.want = want;
@@ -74,10 +78,21 @@ export class AttentionNotifier {
   private state(session: SessionInfo): Tracked {
     let state = this.tracked.get(session.id);
     if (!state) {
-      state = { want: null, told: null, latest: session, timer: null, chain: Promise.resolve() };
+      state = { want: null, told: null, turnTold: null, latest: session, timer: null, chain: Promise.resolve() };
       this.tracked.set(session.id, state);
     }
     return state;
+  }
+
+  private noteTurn(state: Tracked, session: SessionInfo): void {
+    const turn = session.running ? session.turn : null;
+    if (turn === null) {
+      state.turnTold = null;
+      return;
+    }
+    if (state.turnTold?.state === turn.state && state.turnTold.since === turn.since) return;
+    state.turnTold = turn;
+    this.enqueue(state, buildTurnEvent(session, turn));
   }
 
   /** Runs from timers and event listeners: it must never throw into the PTY loop or crash the app. */

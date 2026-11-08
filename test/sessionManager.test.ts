@@ -238,6 +238,55 @@ describe('SessionManager — attention and answers', () => {
     expect(m.hookNotify({ hubSessionId: id, message: 'again' })).toBe(true);
   });
 
+  it('derives the turn state from hook events: dedupes repeats, SessionEnd clears, and a question hook still raises attention', () => {
+    const m = manager();
+    const changes: (string | undefined)[] = [];
+    m.onTurn((session) => changes.push(session.turn?.state));
+    const { id } = m.start({ cwd: work, command: 'claude', env: { CLAUDE_CONFIG_DIR: config, FAKE_SLEEP: '30' } });
+    expect(m.get(id)?.turn).toBeNull();
+    const hook = (hookEvent: string, message = ''): boolean => m.hookNotify({ hubSessionId: id, message, hookEvent });
+    hook('SessionStart');
+    hook('UserPromptSubmit');
+    const since = m.get(id)?.turn?.since;
+    hook('PreToolUse');
+    hook('PostToolUse');
+    expect(m.get(id)?.turn).toEqual({ state: 'working', since });
+    hook('PermissionRequest'); // a tool permission request is not a Notification: no attention prompt
+    expect(m.get(id)?.turn?.state).toBe('waiting');
+    expect(m.get(id)?.attention).toBeNull();
+    hook('Notification', 'Claude needs your permission to use Bash');
+    expect(m.get(id)?.attention).toMatchObject({ reason: 'prompt', source: 'hook' });
+    hook('Stop');
+    hook('Stop');
+    expect(m.get(id)?.turn?.state).toBe('done');
+    hook('SessionEnd');
+    expect(m.get(id)?.turn).toBeNull();
+    expect(changes).toEqual(['working', 'waiting', 'done', undefined]);
+  });
+
+  it('launches Claude with --settings <hub hooks file> unless the user passed one, refreshing the file per launch', async () => {
+    const calls: string[] = [];
+    const hooksFile = join(base, 'claude-hooks.json');
+    const m = new SessionManager(new SessionStore(join(base, 'sessions')), 'test', { baseEnv: () => ({ PATH: `${bin}:/usr/bin:/bin` }), hooksFile: () => (calls.push('refresh'), hooksFile) });
+    managers.push(m);
+    const env = { CLAUDE_CONFIG_DIR: config };
+    const mine = m.start({ cwd: work, command: 'claude', args: ['--settings', '/mine.json'], env });
+    const hub = m.start({ cwd: work, command: 'claude', env });
+    expect(calls).toHaveLength(2);
+    expect(hub.claude?.resumeCommand).toContain(`--settings ${hooksFile}`);
+    expect(mine.claude?.resumeCommand).not.toContain(hooksFile);
+    const output = async (id: string): Promise<string> => {
+      for (let i = 0; i < 50; i++) {
+        const text = (await m.readOutput(id, 0, 4096)).toString();
+        if (text.includes('ARGS=')) return text;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return '';
+    };
+    expect(await output(hub.id)).toContain(`--settings ${hooksFile}`);
+    expect(await output(mine.id)).not.toContain(hooksFile);
+  });
+
   it('never writes to the Claude config dir when a Claude session starts', () => {
     mkdirSync(config);
     const settings = join(config, 'settings.json');
