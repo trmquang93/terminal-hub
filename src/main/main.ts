@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, shell } from 'electron';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
+import { safeExternalUrl } from '../shared/links';
 import type { AnswerRequest, HubDefaults, MenuAction, StartSessionOptions } from '../shared/types';
 import { createApiServer, listenOnLoopback } from './apiServer';
 import { loadOrCreateToken, removeApiFile, writeApiFile } from './apiFile';
@@ -100,6 +101,12 @@ function registerIpc(): void {
     const options = { properties: ['openDirectory' as const, 'createDirectory' as const] };
     const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
     return result.canceled ? null : (result.filePaths[0] ?? null);
+  });
+  ipcMain.handle('hub:openExternal', async (_event, url: unknown) => {
+    const safe = safeExternalUrl(url);
+    if (safe === null) return false;
+    await shell.openExternal(safe);
+    return true;
   });
   manager.onOutput(({ id, endOffset, data }) => send('hub:output', { id, endOffset, data }));
   manager.onChanged((session) => send('hub:changed', session));

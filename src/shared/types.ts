@@ -147,6 +147,8 @@ export interface HubApi {
   deleteAllHistory(): Promise<boolean>;
   renameSession(id: string, title: string): Promise<void>;
   pickFolder(): Promise<string | null>;
+  /** Opens an http(s) URL in the default browser; false when main refuses the URL. */
+  openExternal(url: string): Promise<boolean>;
   onSessionChanged(callback: (session: SessionInfo) => void): () => void;
   onSessionRemoved(callback: (id: string) => void): () => void;
   onOutput(callback: (event: OutputEvent) => void): () => void;

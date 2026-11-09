@@ -23,6 +23,7 @@ const api: HubApi = {
   answer: (id, request) => ipcRenderer.invoke('hub:answer', id, request),
   renameSession: (id, title) => ipcRenderer.invoke('hub:rename', id, title),
   pickFolder: () => ipcRenderer.invoke('hub:pickFolder'),
+  openExternal: (url) => ipcRenderer.invoke('hub:openExternal', url),
   onSessionChanged: (callback) => subscribe<SessionInfo>('hub:changed', callback),
   onSessionRemoved: (callback) => subscribe<string>('hub:removed', callback),
   onOutput: (callback) => subscribe<OutputEvent>('hub:output', callback),
