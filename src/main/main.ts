@@ -1,6 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, shell } from 'electron';
-import { access } from 'node:fs/promises';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { join } from 'node:path';
 import type { Server } from 'node:http';
 import { safeExternalUrl } from '../shared/links';
 import type { AnswerRequest, HubDefaults, MenuAction, StartSessionOptions } from '../shared/types';
@@ -11,8 +10,9 @@ import { AttentionNotifier } from './attentionNotifier';
 import { createHookRefresher } from './claudeHooks';
 import { loadNotifyConfig } from './notifyConfig';
 import { NotifyLog } from './notifyDelivery';
-import { SessionListeners } from './sessionListeners';
 import { dataDir } from './paths';
+import { cachedRepoRoot } from './repoRoot';
+import { SessionListeners } from './sessionListeners';
 import { SessionManager } from './sessionManager';
 import { SessionStore } from './sessionStore';
 import { loginShellPath } from './shellEnv';
@@ -39,22 +39,6 @@ const startedAt = new Date().toISOString();
 
 function defaultShell(): string {
   return process.env.SHELL ?? '/bin/zsh';
-}
-
-const repoRootCache = new Map<string, string | null>();
-
-/** Nearest ancestor of `cwd` (itself included) holding a `.git` entry, file or directory; null outside a repo. Cached per cwd, nulls included. */
-async function repoRoot(cwd: string): Promise<string | null> {
-  if (repoRootCache.has(cwd)) return repoRootCache.get(cwd) ?? null;
-  let found: string | null = null;
-  if (isAbsolute(cwd)) {
-    for (let current = resolve(cwd); found === null; current = dirname(current)) {
-      if (await access(join(current, '.git')).then(() => true, () => false)) found = current;
-      else if (dirname(current) === current) break;
-    }
-  }
-  repoRootCache.set(cwd, found);
-  return found;
 }
 
 function send(channel: string, payload: unknown): void {
@@ -91,7 +75,7 @@ function registerIpc(): void {
   ipcMain.handle('hub:defaults', (): HubDefaults => ({ shell: defaultShell(), home: app.getPath('home'), recentFolders: recentFolders() }));
   ipcMain.handle('hub:repoRoots', async (_event, cwds: string[]) => {
     const roots: Record<string, string | null> = {};
-    for (const cwd of cwds) if (typeof cwd === 'string') roots[cwd] = await repoRoot(cwd);
+    for (const cwd of cwds) if (typeof cwd === 'string') roots[cwd] = await cachedRepoRoot(cwd);
     return roots;
   });
   ipcMain.handle('hub:list', () => manager.list());
