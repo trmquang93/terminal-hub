@@ -26,8 +26,8 @@ export interface SessionService {
   size(id: string): number;
   /** output.log bytes; empty for an agent session. */
   readChunks(id: string, start: number, end: number): AsyncGenerator<Buffer>;
-  /** output.log for a shell, the rendered native transcript (plain text) for an agent session. */
-  readHistory(id: string, offset: number, limit: number): Promise<{ data: Buffer; total: number }>;
+  /** output.log for a shell, the rendered native transcript (plain text) for an agent session; `plain` strips escape codes from an agent's old output.log. */
+  readHistory(id: string, offset: number, limit: number, plain?: boolean): Promise<{ data: Buffer; total: number }>;
   onOutput(listener: (chunk: OutputChunk) => void): () => void;
   onAttention(listener: (session: SessionInfo) => void): () => void;
   onTurn(listener: (session: SessionInfo) => void): () => void;

@@ -249,8 +249,8 @@ export function createApiServer(options: ApiOptions): Server {
       }
       if (action === 'text') {
         if (session.claude) {
-          // The agent's transcript is already plain text.
-          const { data, total } = await service.readHistory(id, numberParam(url, 'offset', 0), Infinity);
+          // The agent's transcript is already plain text; an old output.log is stripped of its escape codes.
+          const { data, total } = await service.readHistory(id, numberParam(url, 'offset', 0), Infinity, true);
           res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': data.length, 'X-Total-Bytes': total });
           res.end(data);
           return;

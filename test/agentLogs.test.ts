@@ -10,6 +10,7 @@ import { SessionManager } from '../src/main/sessionManager';
 import { SessionStore } from '../src/main/sessionStore';
 import type { OutputChunk } from '../src/main/service';
 import type { SessionMeta } from '../src/shared/types';
+import { projectDirs } from '../src/main/claude';
 
 const TOKEN = 'test-token-0123456789abcdef0123456789abcdef';
 
@@ -176,24 +177,71 @@ describe('the terminal view of an agent session', () => {
   });
 });
 
-describe('/text and /output', () => {
-  async function api(m: SessionManager): Promise<(path: string) => Promise<{ body: string; headers: http.IncomingHttpHeaders }>> {
-    const server = createApiServer({ service: m, token: TOKEN, version: 't', startedAt: '2026-01-01T00:00:00.000Z' });
-    servers.push(server);
-    const port = await listenOnLoopback(server);
-    expect((server.address() as AddressInfo).address).toBe('127.0.0.1');
-    return (path) =>
-      new Promise((resolve, reject) => {
-        http
-          .get({ host: '127.0.0.1', port, path, headers: { Authorization: `Bearer ${TOKEN}` } }, (res) => {
-            const parts: Buffer[] = [];
-            res.on('data', (chunk: Buffer) => parts.push(chunk));
-            res.on('end', () => resolve({ body: Buffer.concat(parts).toString(), headers: res.headers }));
-          })
-          .on('error', reject);
-      });
-  }
+async function api(m: SessionManager): Promise<(path: string) => Promise<{ body: string; headers: http.IncomingHttpHeaders }>> {
+  const server = createApiServer({ service: m, token: TOKEN, version: 't', startedAt: '2026-01-01T00:00:00.000Z' });
+  servers.push(server);
+  const port = await listenOnLoopback(server);
+  expect((server.address() as AddressInfo).address).toBe('127.0.0.1');
+  return (path) =>
+    new Promise((resolve, reject) => {
+      http
+        .get({ host: '127.0.0.1', port, path, headers: { Authorization: `Bearer ${TOKEN}` } }, (res) => {
+          const parts: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => parts.push(chunk));
+          res.on('end', () => resolve({ body: Buffer.concat(parts).toString(), headers: res.headers }));
+        })
+        .on('error', reject);
+    });
+}
 
+describe('an agent session from before native transcripts', () => {
+  // Such a session has an output.log and no transcript file; its raw log is the only history there is.
+  const OLD_LOG = '\x1b[1mold\x1b[0m line\r\nsecond\r\n';
+  const dropTranscript = (id: string): void => {
+    const sid = readMeta(id).claude?.sessionId ?? '';
+    for (const dir of projectDirs(config, work)) rmSync(join(dir, `${sid}.jsonl`), { force: true });
+  };
+
+  it('shows the old output.log when there is no transcript, raw in the pane and stripped as text', async () => {
+    const m = manager();
+    const get = await api(m);
+    const id = claude(m);
+    await exited(m, id);
+    dropTranscript(id);
+    writeFileSync(join(base, 'sessions', id, 'output.log'), OLD_LOG);
+
+    const tail = await m.readTail(id, 1 << 20);
+    expect(tail.source).toBe('log');
+    expect(Buffer.from(tail.data).toString()).toBe(OLD_LOG);
+    expect((await get(`/sessions/${id}/text`)).body).toBe('old line\nsecond\n');
+    expect((await get(`/sessions/${id}/output`)).body).toBe(OLD_LOG);
+    expect(readFileSync(join(base, 'sessions', id, 'output.log'), 'utf8')).toBe(OLD_LOG);
+    expect(files(id)).toEqual(['meta.json', 'output.log']);
+  });
+
+  it('keeps the one-line note when there is neither a transcript nor a log', async () => {
+    const m = manager();
+    const get = await api(m);
+    const id = claude(m);
+    await exited(m, id);
+    dropTranscript(id);
+
+    expect(Buffer.from((await m.readTail(id, 1 << 20)).data).toString()).toMatch(/^\(no transcript yet/);
+    expect((await get(`/sessions/${id}/text`)).body).toMatch(/^\(no transcript yet/);
+    expect(files(id)).toEqual(['meta.json']);
+  });
+
+  it('a shell session with an output.log is unchanged', async () => {
+    const m = manager();
+    const get = await api(m);
+    const shell = m.start({ cwd: work, command: 'sh', args: ['-c', 'printf "\\033[1mhi\\033[0m\\r\\n"'] }).id;
+    await exited(m, shell);
+    expect((await get(`/sessions/${shell}/text`)).body).toBe('hi\n');
+    expect((await m.readTail(shell, 1 << 20)).source).toBe('log');
+  });
+});
+
+describe('/text and /output', () => {
   it('serves the transcript for an agent session and the ANSI-stripped log for a shell session', async () => {
     const m = manager();
     const get = await api(m);

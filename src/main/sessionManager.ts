@@ -3,8 +3,9 @@ import { EventEmitter } from 'node:events';
 import { accessSync, constants, statSync } from 'node:fs';
 import { basename, delimiter, join } from 'node:path';
 import * as pty from 'node-pty';
-import type { AnswerRequest, AttentionInfo, OutputSlice, SessionInfo, SessionMeta, StartSessionOptions } from '../shared/types';
+import type { AgentInfo, AnswerRequest, AttentionInfo, OutputSlice, SessionInfo, SessionMeta, StartSessionOptions } from '../shared/types';
 import { TurnTracker } from './agentState';
+import { stripAnsi } from './ansi';
 import { AttentionTracker, resolveAnswer, SAFE_UNATTENDED_POLICY } from './attention';
 import { discoverSessionId, fillTemplate, findClaudeIndex, hasSettingsFlag, planClaudeLaunch, renderCommand, SESSION_PLACEHOLDER, transcriptExists, withSettings } from './claude';
 import { HubError } from './errors';
@@ -12,7 +13,7 @@ import { discoverOpencodeSessionId, opencodeSessionExists, planOpencodeLaunch } 
 import { OscTitleParser } from './oscTitle';
 import type { OutputChunk, SessionService } from './service';
 import type { SessionStore } from './sessionStore';
-import { renderTranscript } from './transcript';
+import { nativeTranscript, renderTranscript } from './transcript';
 
 const STOP_GRACE_MS = 3000;
 const ANSWER_CHUNK_GAP_MS = 150;
@@ -152,13 +153,30 @@ export class SessionManager implements SessionService {
     return meta.claude ? noChunks() : this.store.readChunks(id, start, end);
   }
 
-  /** The session's history from `offset`: output.log for a shell, the rendered native transcript (plain text) for Claude Code and opencode. `total` is the size of that whole history. */
-  async readHistory(id: string, offset: number, limit: number): Promise<{ data: Buffer; total: number }> {
+  /**
+   * The session's history from `offset`: output.log for a shell, the rendered native transcript (plain text) for Claude Code and
+   * opencode. An agent with no native transcript falls back to its old output.log; `plain` strips that log's escape codes.
+   * `total` is the size of that whole history.
+   */
+  async readHistory(id: string, offset: number, limit: number, plain = false): Promise<{ data: Buffer; total: number }> {
     const meta = this.require(id);
     if (!meta.claude) return { data: await this.store.readOutput(id, offset, limit), total: this.store.size(id) };
-    const all = Buffer.from(renderTranscript(meta.claude, meta.cwd));
+    const { data: raw, legacy } = await this.agentHistory(meta, meta.claude);
+    const all = legacy && plain ? Buffer.from(stripAnsi(raw)) : raw;
     const start = Math.min(Math.max(offset, 0), all.length);
     return { data: all.subarray(start, start + limit), total: all.length };
+  }
+
+  /**
+   * An agent's history: its native transcript; else, for a session from before agents kept their own transcript, its old
+   * output.log (read-only); else the one-line note. `legacy` is true only for that log.
+   */
+  private async agentHistory(meta: SessionMeta, claude: AgentInfo): Promise<{ data: Buffer; legacy: boolean }> {
+    const native = nativeTranscript(claude, meta.cwd);
+    if (native !== null) return { data: Buffer.from(native), legacy: false };
+    const total = this.store.size(meta.id);
+    if (total > 0) return { data: await this.store.readOutput(meta.id, 0, total), legacy: true };
+    return { data: Buffer.from(renderTranscript(claude, meta.cwd)), legacy: false };
   }
 
   /**
@@ -174,8 +192,10 @@ export class SessionManager implements SessionService {
       return { data: await this.store.readOutput(id, start, total - start), start, total, source: 'log' };
     }
     if (!this.live.has(id)) {
-      const text = renderTranscript(meta.claude, meta.cwd);
-      return { data: Buffer.from(text.replaceAll('\n', '\r\n')), start: 0, total: 0, source: 'transcript' };
+      const { data, legacy } = await this.agentHistory(meta, meta.claude);
+      // The old log is raw terminal output, shown like a shell's tail; it keeps no live offsets, so none are reported.
+      if (legacy) return { data: data.subarray(Math.max(0, data.length - tailBytes)), start: 0, total: 0, source: 'log' };
+      return { data: Buffer.from(data.toString().replaceAll('\n', '\r\n')), start: 0, total: 0, source: 'transcript' };
     }
     const out = this.liveOutputs.get(id);
     const data = Buffer.concat(out?.chunks ?? []);

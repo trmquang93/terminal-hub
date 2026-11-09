@@ -70,6 +70,20 @@ export function renderOpencodeTranscript(dataDir: string, sessionId: string): st
   return render(rows.map((row) => ({ role: typeof row.role === 'string' ? row.role : 'unknown', text: typeof row.text === 'string' ? row.text : '' })));
 }
 
+/**
+ * The agent's native history as plain text, or null when there is none to show: no session id yet, no transcript
+ * file or DB rows, no user/assistant text, or an unreadable store. Never throws.
+ */
+export function nativeTranscript(agent: AgentInfo, cwd: string): string | null {
+  if (agent.sessionId === null) return null;
+  try {
+    const text = agent.provider === 'opencode' ? renderOpencodeTranscript(agent.configDir, agent.sessionId) : renderClaudeTranscript(agent.configDir, cwd, agent.sessionId);
+    return text === NO_TRANSCRIPT_NOTE || text === UNAVAILABLE_NOTE ? null : text;
+  } catch {
+    return null;
+  }
+}
+
 /** The agent's own history as plain text (`\n` line ends). Never throws: a missing or unreadable store yields a one-line note. */
 export function renderTranscript(agent: AgentInfo, cwd: string): string {
   if (agent.sessionId === null) return NO_ID_NOTE;
