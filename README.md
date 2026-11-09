@@ -62,7 +62,7 @@ the app while a session is live: a running session blocks every step, and the ch
 
 `~/Library/Application Support/TerminalHub/` (override with `TERMINAL_HUB_DATA_DIR`)
 
-- `sessions/<uuid>/meta.json`, `input.log`, `answers.log` (auto-answers), and for **shell sessions only** `output.log` (raw PTY bytes).
+- `sessions/<uuid>/meta.json`, `answers.log` (auto-answers), and for **shell sessions only** `output.log` (raw PTY bytes).
   Claude Code and OpenCode sessions (`meta.claude` set) write no `output.log`: a full-screen TUI repaints the whole screen, so one
   short OpenCode chat produced 28 MB. Their history is the agent's own transcript, read in place and never copied (see below).
   `bytesWritten` stays in `meta.json` and counts `output.log` bytes, so it is `0` for agent sessions. An `output.log` left by an

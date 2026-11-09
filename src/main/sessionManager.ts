@@ -467,7 +467,6 @@ export class SessionManager implements SessionService {
     const child = this.live.get(id);
     if (!child) throw new HubError(409, 'session is not running');
     child.write(data);
-    this.store.appendInput(id, Buffer.from(data));
     this.trackers.get(id)?.input();
   }
 

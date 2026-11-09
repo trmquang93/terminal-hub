@@ -79,7 +79,7 @@ afterEach(async () => {
 });
 
 describe('agent sessions keep no raw PTY log', () => {
-  it('a Claude session creates no output.log, still streams live output, and keeps meta.json, input.log and bytesWritten 0', async () => {
+  it('a Claude session creates no output.log, still streams live output, writes no input.log, and keeps bytesWritten 0', async () => {
     const m = manager();
     const id = claude(m, { FAKE_WAIT: '1' });
     await until(() => seen(id).includes('LIVE-OUTPUT'), 'live output event');
@@ -87,7 +87,7 @@ describe('agent sessions keep no raw PTY log', () => {
     m.write(id, 'hello\n');
     await exited(m, id);
     expect(seen(id)).toContain('got=hello');
-    expect(files(id)).toEqual(['input.log', 'meta.json']);
+    expect(files(id)).toEqual(['meta.json']);
     expect(readMeta(id).bytesWritten).toBe(0);
     expect(m.get(id)?.bytesWritten).toBe(0);
   });
@@ -109,6 +109,15 @@ describe('agent sessions keep no raw PTY log', () => {
     expect(readFileSync(join(base, 'sessions', id, 'output.log'), 'utf8')).toContain('shell-output');
     expect(readMeta(id).bytesWritten).toBeGreaterThan(0);
     expect((await m.readTail(id, 1 << 20)).source).toBe('log');
+  });
+
+  it('a shell session that receives input writes meta.json and output.log only, never input.log', async () => {
+    const m = manager();
+    const { id } = m.start({ cwd: work, command: 'sh', args: ['-c', 'read line; echo got=$line'] });
+    m.write(id, 'typed\n');
+    await exited(m, id);
+    expect(seen(id)).toContain('got=typed');
+    expect(files(id)).toEqual(['meta.json', 'output.log']);
   });
 
   it('leaves an output.log written by an older version alone, and remove deletes the whole folder', async () => {

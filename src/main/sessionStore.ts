@@ -19,7 +19,7 @@ export function isSessionId(id: string): boolean {
 }
 
 /**
- * On-disk session storage: `<root>/<id>/{meta.json,output.log,input.log}`.
+ * On-disk session storage: `<root>/<id>/{meta.json,output.log}`.
  * output.log exists for shell sessions only: Claude Code and opencode keep their own transcript (see transcript.ts).
  * Nothing here ever prunes; only delete()/deleteAll() remove data.
  */
@@ -131,10 +131,6 @@ export class SessionStore {
     writer.total += chunk.length;
     writer.timer ??= setTimeout(() => this.flush(id), FLUSH_DELAY_MS);
     return writer.total;
-  }
-
-  appendInput(id: string, chunk: Buffer): void {
-    appendFileSync(join(this.dir(id), 'input.log'), chunk);
   }
 
   /** One JSON line per auto-answer, so unattended approvals can be audited. */
