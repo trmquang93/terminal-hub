@@ -77,24 +77,48 @@ export interface GateInput {
   expectedBranch: string;
   /** A previous run already pulled and got part-way (a failed build, a session that started): proceed even though ahead is 0. */
   resume?: boolean;
+  /** Commit the installed app was built from (packaged build-info.json); null if missing or unreadable. Undefined: not checked. */
+  installedCommit?: string | null;
 }
 
 export type Decision =
   | { kind: 'skip'; reason: string }
   /** An update is pending but this is not an installed app: log only. */
   | { kind: 'dev'; reason: string }
-  | { kind: 'wait'; reason: string }
-  | { kind: 'install'; reason: string };
+  | { kind: 'wait'; reason: string; detail?: string }
+  | { kind: 'install'; reason: string; detail?: string };
+
+const shortSha = (sha: string): string => sha.slice(0, 7);
 
 /** The only place that decides whether an update may be applied right now. */
 export function shouldInstall(input: GateInput): Decision {
   const { state, expectedBranch } = input;
   if (state.dirty) return { kind: 'skip', reason: 'working tree has local changes' };
   if (state.branch !== expectedBranch) return { kind: 'skip', reason: `checkout is on "${state.branch}", updates track "${expectedBranch}"` };
-  if (state.ahead === 0 && !input.resume) return { kind: 'skip', reason: 'up to date' };
+  // Nothing new on origin: still an update when the installed app was built from an older commit than HEAD.
+  let detail: string | undefined;
+  if (state.ahead === 0 && !input.resume) {
+    const { installedCommit } = input;
+    if (!input.isPackaged || installedCommit === undefined) return { kind: 'skip', reason: 'up to date' };
+    if (installedCommit === null) return { kind: 'skip', reason: 'installed build-info.json is missing or unreadable; cannot compare the installed build with HEAD' };
+    if (installedCommit === state.head) return { kind: 'skip', reason: 'up to date' };
+    detail = `installed build ${shortSha(installedCommit)} != HEAD ${shortSha(state.head)}`;
+  }
   if (!input.isPackaged) return { kind: 'dev', reason: 'not a packaged app; log only' };
-  if (input.running > 0) return { kind: 'wait', reason: `${input.running} session${input.running === 1 ? '' : 's'} running` };
-  return { kind: 'install', reason: 'no session running' };
+  if (input.running > 0) return { kind: 'wait', reason: `${input.running} session${input.running === 1 ? '' : 's'} running`, detail };
+  return { kind: 'install', reason: 'no session running', detail };
+}
+
+/** The commit recorded in the packaged `resources/build-info.json`; null if absent, unreadable or not a full sha. */
+export function readInstalledCommit(resourcesPath: string | undefined): string | null {
+  const text = resourcesPath ? readText(join(resourcesPath, 'build-info.json')) : null;
+  if (text === null) return null;
+  try {
+    const commit = (JSON.parse(text) as { commit?: unknown }).commit;
+    return typeof commit === 'string' && /^[0-9a-f]{40,64}$/.test(commit) ? commit : null;
+  } catch {
+    return null;
+  }
 }
 
 export function aheadText(ahead: number): string {
@@ -356,7 +380,8 @@ export class Updater {
       if (!state) return;
       const decision = this.decide(state);
       if (decision.kind === 'wait' || decision.kind === 'install') {
-        this.note('INFO', `update pending: ${state.ahead} commit${state.ahead === 1 ? '' : 's'} behind origin/${this.config.branch}; applies after ${this.idleMs / 1000}s with no running session`);
+        const pending = decision.detail ?? `${state.ahead} commit${state.ahead === 1 ? '' : 's'} behind origin/${this.config.branch}`;
+        this.note('INFO', `update pending: ${pending}; applies after ${this.idleMs / 1000}s with no running session`);
         this.setStatus('available', state.ahead, aheadText(state.ahead));
         this.startIdlePolling();
         return;
@@ -373,7 +398,7 @@ export class Updater {
   }
 
   private decide(state: RepoState): Decision {
-    return shouldInstall({ isPackaged: this.options.isPackaged, running: this.runningCount(), state, expectedBranch: this.config?.branch ?? DEFAULT_BRANCH, resume: this.stage !== 'pull' });
+    return shouldInstall({ isPackaged: this.options.isPackaged, running: this.runningCount(), state, expectedBranch: this.config?.branch ?? DEFAULT_BRANCH, resume: this.stage !== 'pull', installedCommit: readInstalledCommit(this.options.resourcesPath) });
   }
 
   private runningCount(): number {
@@ -446,7 +471,7 @@ export class Updater {
         }
         return;
       }
-      this.write('INFO', `applying update (${state.ahead} commit${state.ahead === 1 ? '' : 's'}) from ${state.head.slice(0, 8)}${this.dryRun ? ' [DRY RUN]' : ''}`);
+      this.write('INFO', `applying update (${decision.detail ?? `${state.ahead} commit${state.ahead === 1 ? '' : 's'}`}) from ${state.head.slice(0, 8)}${this.dryRun ? ' [DRY RUN]' : ''}`);
 
       if (stage === 'pull') {
         const pull = await this.run('git', ['pull', '--ff-only', 'origin', config.branch], { mutating: true, timeoutMs: GIT_TIMEOUT_MS });

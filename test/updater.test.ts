@@ -6,6 +6,7 @@ import {
   aheadText,
   parseRepoState,
   parseUpdateConfig,
+  readInstalledCommit,
   resolveUpdateConfig,
   shouldInstall,
   Updater,
@@ -17,6 +18,7 @@ import {
 } from '../src/main/updater';
 
 const SHA = 'a'.repeat(40);
+const OLD_SHA = 'b'.repeat(40);
 
 describe('parseUpdateConfig', () => {
   it('applies defaults to an empty object', () => {
@@ -154,6 +156,55 @@ describe('shouldInstall gating', () => {
   });
 });
 
+describe('shouldInstall installed-build gate', () => {
+  const upToDate: RepoState = { head: SHA, branch: 'main', dirty: false, ahead: 0 };
+  const gate = (over: Partial<Omit<GateInput, 'state'>> & { state?: Partial<RepoState> } = {}): ReturnType<typeof shouldInstall> =>
+    shouldInstall({ isPackaged: true, running: 0, expectedBranch: 'main', ...over, state: { ...upToDate, ...over.state } });
+
+  it('installs when the installed build is older than HEAD, even with nothing new on origin', () => {
+    expect(gate({ installedCommit: OLD_SHA })).toEqual({ kind: 'install', reason: 'no session running', detail: 'installed build bbbbbbb != HEAD aaaaaaa' });
+  });
+
+  it('still waits for sessions and respects the other gates when the installed build is stale', () => {
+    expect(gate({ installedCommit: OLD_SHA, running: 1 })).toMatchObject({ kind: 'wait', reason: '1 session running' });
+    expect(gate({ installedCommit: OLD_SHA, state: { dirty: true } }).kind).toBe('skip');
+    expect(gate({ installedCommit: OLD_SHA, state: { branch: 'feature' } }).kind).toBe('skip');
+    expect(gate({ installedCommit: OLD_SHA, isPackaged: false }).kind).toBe('skip');
+  });
+
+  it('skips when the installed build is HEAD and origin has nothing new', () => {
+    expect(gate({ installedCommit: SHA })).toEqual({ kind: 'skip', reason: 'up to date' });
+  });
+
+  it('skips with a reason when build-info.json is missing', () => {
+    expect(gate({ installedCommit: null })).toEqual({ kind: 'skip', reason: expect.stringContaining('build-info.json is missing') as string });
+  });
+
+  it('ahead of origin still installs whatever the installed build says', () => {
+    expect(gate({ state: { ahead: 2 }, installedCommit: SHA }).kind).toBe('install');
+    expect(gate({ state: { ahead: 2 }, installedCommit: null }).kind).toBe('install');
+  });
+});
+
+describe('readInstalledCommit', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'thub-buildinfo-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('reads the commit, and returns null when it is missing, unreadable or not a sha', () => {
+    expect(readInstalledCommit(undefined)).toBeNull();
+    expect(readInstalledCommit(dir)).toBeNull();
+    writeFileSync(join(dir, 'build-info.json'), '{nope');
+    expect(readInstalledCommit(dir)).toBeNull();
+    writeFileSync(join(dir, 'build-info.json'), JSON.stringify({ commit: 'abc' }));
+    expect(readInstalledCommit(dir)).toBeNull();
+    writeFileSync(join(dir, 'build-info.json'), JSON.stringify({ repo: '/x', commit: OLD_SHA, branch: 'main' }));
+    expect(readInstalledCommit(dir)).toBe(OLD_SHA);
+  });
+});
+
 describe('aheadText', () => {
   it('names the count', () => {
     expect(aheadText(3)).toBe('update available (3) - waits for idle');
@@ -275,6 +326,47 @@ describe('Updater', () => {
     expect(calls).toEqual([]);
     expect(logText().match(/WARN/g)).toHaveLength(1);
     expect(updater.getStatus().phase).toBe('idle');
+  });
+
+  describe('installed build vs HEAD (origin has nothing new)', () => {
+    let resourcesPath: string;
+    const writeInfo = (commit: string): void => writeFileSync(join(resourcesPath, 'build-info.json'), JSON.stringify({ repo, commit, branch: 'main' }));
+    beforeEach(() => {
+      resourcesPath = join(root, 'resources');
+      mkdirSync(resourcesPath);
+      ahead = '0\n';
+    });
+
+    it('rebuilds and installs when the installed build is stale, and logs why', async () => {
+      writeInfo(OLD_SHA);
+      await cycle(makeUpdater({ resourcesPath }));
+      expect(logText()).toContain('update pending: installed build bbbbbbb != HEAD aaaaaaa');
+      expect(mutating()).toEqual(['git pull --ff-only origin main', 'npm run package:app']);
+      expect(quit).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not install while a session is running', async () => {
+      writeInfo(OLD_SHA);
+      running = true;
+      await cycle(makeUpdater({ resourcesPath }));
+      expect(mutating()).toEqual([]);
+      expect(quit).not.toHaveBeenCalled();
+    });
+
+    it('takes no action when the installed build is HEAD', async () => {
+      writeInfo(SHA);
+      await cycle(makeUpdater({ resourcesPath }));
+      expect(mutating()).toEqual([]);
+      expect(quit).not.toHaveBeenCalled();
+      expect(logText()).toContain('no action: up to date');
+    });
+
+    it('takes no action and logs the reason when build-info.json is missing', async () => {
+      await cycle(makeUpdater({ resourcesPath }));
+      expect(mutating()).toEqual([]);
+      expect(quit).not.toHaveBeenCalled();
+      expect(logText()).toContain('no action: installed build-info.json is missing or unreadable');
+    });
   });
 
   describe('dry run', () => {
