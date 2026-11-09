@@ -93,7 +93,7 @@ function SessionRow({ session, selected, selectMode, checked, onSelect, onDelete
   );
 }
 
-function SessionGroups({ sessions, actions }: { sessions: SessionInfo[]; actions: RowActions }) {
+function SessionGroups({ sessions, actions, collapsible = true }: { sessions: SessionInfo[]; actions: RowActions; collapsible?: boolean }) {
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const toggle = (cwd: string) =>
     setCollapsed((prev) => {
@@ -104,24 +104,33 @@ function SessionGroups({ sessions, actions }: { sessions: SessionInfo[]; actions
   return (
     <>
       {groupSessions(sessions).map((group) => {
-        const open = !collapsed.has(group.cwd);
+        const open = !collapsible || !collapsed.has(group.cwd);
+        const head = (
+          <>
+            <span className="group-title">
+              {collapsible && <span className="group-chevron" aria-hidden="true">▾</span>}
+              <strong>{group.name}</strong>
+              <span className="group-count" title={`${group.sessions.length} sessions`}>{group.sessions.length}</span>
+            </span>
+            <span className="cwd">{shortenPath(group.cwd, actions.home)}</span>
+          </>
+        );
         return (
           <li key={group.cwd} className={open ? 'group' : 'group collapsed'}>
-            <button
-              type="button"
-              className="group-head"
-              title={group.cwd}
-              aria-expanded={open}
-              aria-label={`${open ? 'Collapse' : 'Expand'} ${group.name} sessions`}
-              onClick={() => toggle(group.cwd)}
-            >
-              <span className="group-title">
-                <span className="group-chevron" aria-hidden="true">▾</span>
-                <strong>{group.name}</strong>
-                <span className="group-count" title={`${group.sessions.length} sessions`}>{group.sessions.length}</span>
-              </span>
-              <span className="cwd">{shortenPath(group.cwd, actions.home)}</span>
-            </button>
+            {collapsible ? (
+              <button
+                type="button"
+                className="group-head"
+                title={group.cwd}
+                aria-expanded={open}
+                aria-label={`${open ? 'Collapse' : 'Expand'} ${group.name} sessions`}
+                onClick={() => toggle(group.cwd)}
+              >
+                {head}
+              </button>
+            ) : (
+              <div className="group-head" title={group.cwd}>{head}</div>
+            )}
             {open && (
               <ul className="group-sessions">
                 {group.sessions.map((session) => (
@@ -342,7 +351,7 @@ export function App() {
               </button>
               {archivedOpen && (
                 <ul className="group-sessions">
-                  <SessionGroups sessions={archived} actions={actions} />
+                  <SessionGroups sessions={archived} actions={actions} collapsible={false} />
                 </ul>
               )}
             </li>
