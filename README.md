@@ -179,49 +179,80 @@ question panel with quick keys, and a throttled macOS notification.
 `POST /sessions/:id/answer` `{ "keys": "1\r" }` or `{ "text": "yes", "submit": true }` (names: yes no enter esc tab up down 1–9).
 Per-session `autoAnswer` policy (off by default; `unattended: true` = approve `Do you want to proceed?` with Enter only).
 
-## Push notifications (webhook)
+## Session events: per-session listeners
 
-When a session starts waiting for a decision, or stops, the app POSTs the event to your endpoint, so an assistant can be woken
-up and reply with `hub answer <id> …` instead of polling. Create `~/Library/Application Support/TerminalHub/notify.json`
-(under `TERMINAL_HUB_DATA_DIR` when set):
+A session event is delivered **only** to listeners registered on that session. **No listener means no event**, and a
+session created through `POST /sessions` or `hub run` with no listener is not created at all. The design is in
+`docs/agent-events.md`.
 
-```json
-{ "url": "http://127.0.0.1:PORT/hooks/xxx", "bearer": "secret-or-empty" }
-```
-
-- The file is read again for every send: edit it, no restart. Fallback when it has no usable `url`:
-  env `TERMINAL_HUB_NOTIFY_URL` / `TERMINAL_HUB_NOTIFY_BEARER` (set for the app process). One source is used whole.
-  No url anywhere = feature off. A garbage file is ignored with a warning in the log.
-- `POST <url>`, `Content-Type: application/json`, plus `Authorization: Bearer <bearer>` only when `bearer` is non-empty:
+Three kinds of listener:
 
 ```json
-{
-  "event": "attention",
-  "session": {
-    "id": "…", "title": "…", "cwd": "/path", "command": "sh", "state": "running",
-    "reason": "prompt", "promptText": "Continue? [y/N]", "source": "heuristic", "since": "2026-11-08T07:00:00.000Z"
-  }
-}
+{ "kind": "http", "events": ["attention"], "http": { "url": "https://agent.example/hook", "bearer": "secret" } }
+{ "kind": "command", "events": ["attention", "exit"], "command": { "argv": ["/usr/bin/node", "/opt/agent/hook.mjs"] } }
+{ "kind": "openmausbot", "events": ["attention", "turn", "exit"], "openmausbot": { "botId": "…", "threadId": "…" } }
 ```
 
-  `event` is `attention` or `resolved` (or `turn`, see above). `resolved` repeats the question that was reported (same `since`) and the session's
-  current `state` (`exited` when the process ended). Only these fields are sent: never the API token (also scrubbed from the
-  question text), `api.json`, env, argv or the output. `promptText` is the last ~10 plain-text lines, capped at 4000 chars.
-- **When:** once per question. `attention` goes out when a `prompt` has been on screen for 1 s (redraws and blinking do not
-  repeat it; a prompt that vanishes inside that second is never sent); `resolved` when it is answered or scrolls away, or when the
-  session exits. The 20 s `idle` fallback is not pushed. A prompt that the session's `autoAnswer` policy has a rule for is
-  answered by the app and not pushed. The 30 s per-session throttle applies to the macOS banner only.
-- **Delivery:** 5 s timeout, up to 3 attempts (waits of 0.5 s and 1.5 s) for network errors, timeouts, 5xx and 429; other 4xx
-  and redirects are final. A session's events are sent in order; nothing waits for the endpoint (not the PTY loop, not the UI).
-  An unreachable endpoint is a `WARN` line, nothing else. On quit the app gives final events up to 2 s.
-- **Log:** `notifications.log` in the data dir, one line per attempt and one per failure (host only, never the URL path or
-  bearer). At 1 MB it rotates to `notifications.log.1`.
-- **Test it:** `hub notify-test` sends one synthetic `attention` event (`id: "notify-test"`) to the configured endpoint, one
-  attempt, and prints the HTTP status (exit 1 on failure). It does not need the app to be running.
+`events` defaults to `attention, resolved, turn, exit`. `http` gets each event as a JSON POST (`bearer` becomes
+`Authorization: Bearer …`). `command` is spawned with `shell: false`, gets one JSON line on stdin and exit 0 means delivered;
+it may also acknowledge a handshake by printing `{"ack":"<token>"}` as its first stdout line. `openmausbot` spools the event
+under `<data dir>/outbox/openmausbot/<botId>/<threadId>/` and runs the bridge command from `<data dir>/omb-bridge.json`
+(`{"command":[…],"timeoutMs":5000}`); without that file an `openmausbot` listener is a 400 at create time.
+
+### The handshake
+
+A listener is not registered until it answers. The hub sends this test event to every listener in parallel:
+
+```json
+{ "event": "handshake", "handshakeId": "hs_…", "token": "…one-time…", "expiresAt": "…",
+  "instructions": { "cli": "hub ack hs_… <token>", "http": "POST http://127.0.0.1:PORT/handshakes/hs_…/ack {\"token\":\"…\"}" },
+  "listener": { "kind": "http", "events": ["attention"] }, "sessionRequest": { "cwd": "…", "command": "…" }, "testEvent": true }
+```
+
+The listener answers with `hub ack <handshake-id> <token>` or `POST /handshakes/:id/ack` (the only route that does not need
+the API bearer; the one-time token is the credential, it is single-use and expires after 30 s by default, per-listener
+`ackTimeoutSec` 1–300). Only when **every** listener has acked is the session created. Any timeout or failed test delivery
+cancels the whole create: 504, no session folder, no `meta.json`, no pty. With `"wait": false` the create answers 202 and a
+caller polls `GET /handshakes/:id`.
+
+### A bot that wants the session's events
+
+```
+hub run --detach --cwd /work/repo \
+  --listen 'omb:<botId>/<threadId>#events=attention,turn,exit' \
+  -- claude
+```
+
+The test event arrives in that bot thread, the bot runs `hub ack …`, and `hub run` then prints the session id and starts
+`claude`. Attach later with the same handshake:
+
+```
+hub listen 8f0c1d2e --listen 'http:https://agent.example/hook#events=attention'
+```
+
+Listener specs: `omb:<botId>/<threadId>`, `http:<url>`, `cmd:<argv0>[,<arg>…]`, plus `#events=attention,turn,exit`,
+`#header=Name:Value` and `#bearer-env=VAR` for `http`. Use `--listen-file PATH` (one JSON listener object) so a secret never
+lands in shell history.
+
+### Journal, retries, visibility
+
+Every emitted event is appended once to `sessions/<id>/events.jsonl` with a persisted monotonic `seq` (capped at 5000 lines
+or 1 MB, oldest first), so `hub events <id> --since <seq>` replays what a listener missed and survives an app restart. Each
+listener has a cursor under `sessions/<id>/listeners/<id>/cursor.json` and an attempt log in `deliveries.jsonl`. Delivery is
+at-least-once with backoff `0.5, 1.5, 4, 10, 30` s and 6 attempts; a failed event stays in the journal and is counted, and
+three consecutive failed events mark the listener `degraded` until one succeeds. Nothing waits for a listener: not the PTY
+loop, not input, not the UI.
+
+Read shapes are redacted: `GET /sessions/:id/listeners` (and `hub listeners`) show an `http` listener's host only, a
+`command` listener's argv[0] basename and argv length, and the `openmausbot` ids — never a full URL, bearer or header.
+`listeners.json` is written 0600 and deleted with the session folder.
+
+`notify.json` / `TERMINAL_HUB_NOTIFY_*` no longer feed session events. `hub notify-test` still sends one synthetic event to
+that legacy endpoint until it is removed.
 
 ## HTTP API (127.0.0.1, `Authorization: Bearer <token>` except `/health`)
 
-`GET /health` (`ok`, `version`, `startedAt`, `pid`) · `GET /sessions[?attention=1]` (includes archived sessions; each has `archived`) · `POST /sessions` · `GET /sessions/:id` · `GET …/output?offset&limit` · `GET …/text?offset` ·
+`GET /health` (`ok`, `version`, `startedAt`, `pid`) · `GET /sessions[?attention=1]` (includes archived sessions; each has `archived`) · `POST /sessions` (requires `listeners`; 201 after the handshake, 202 with `wait:false`) · `POST /sessions/:id/listeners` · `GET|DELETE /sessions/:id/listeners[/:listenerId]` · `POST /handshakes/:id/ack` · `GET /handshakes/:id` · `GET /sessions/:id/events?since&limit` · `GET /sessions/:id/deliveries?listener&limit` · `GET /sessions/:id` · `GET …/output?offset&limit` · `GET …/text?offset` ·
 `GET …/stream` (SSE, live output only) · `GET /events` (SSE: attention + turn + exit) · `POST …/input` · `POST …/answer` · `POST …/resize` `{ "cols": 1..1000, "rows": 1..1000 }` (400 otherwise, 409 when not running) · `POST …/stop` · `POST …/resume` ·
 `POST …/title` `{ "title": "…" }` pins, `{ "auto": true }` unpins · `POST …/archive` `{ "archived": true|false }` (returns the session; 400 while it runs) · `DELETE /sessions/:id` ·
 `POST /sessions/delete` `{ "ids": [...] }` (no confirmation; kills running ones; 404 and nothing deleted if an id is unknown) · `POST /sessions/delete-all` → `{ "ok": true, "deleted": N }` (no confirmation, kills running ones) · `POST /hooks/claude`
@@ -251,9 +282,15 @@ hub rename <id> <title> | rename <id> --auto   pin a title / let the program's t
 hub wait <id> [--timeout S] [--json]   exit 10 on attention (prints the question), child's code on exit, 124 on timeout
 hub answer <id> yes|no|enter|esc|tab|up|down|1-9|<text>
 hub watch                       stream attention / turn / exit events as JSON lines (Ctrl-C exits 0)
-hub notify-test                 send one synthetic attention event to the webhook in notify.json
+hub run … --listen SPEC [--listen-file PATH]   listeners are required; all must ack before the session exists
+hub listen <id> --listen SPEC [--no-wait]      add a listener to a running session (same handshake)
+hub ack <handshake-id> <token>                 acknowledge a pending listener handshake
+hub listeners <id> [--json] | listeners rm <id> <listener> | listeners resume <id> <listener>
+hub events <id> [--since SEQ] [--follow] [--json]        the durable event journal
+hub deliveries <id> [--listener ID] [--limit N] [--json] per-listener attempt log
+hub notify-test                 send one synthetic attention event to the legacy notify.json endpoint
 hub --help                      commands, flags, exit codes and the data dir (also: `hub` with no arguments), exit 0
 ```
 
-`--json` (ls, show, status, run, wait): stdout is exactly one JSON value; a failure prints `{"error":"…","code":N}` to stderr and exits
+`--json` (ls, show, status, run, wait, listen, ack, listeners, events, deliveries): stdout is exactly one JSON value; a failure prints `{"error":"…","code":N}` to stderr and exits
 with the same code as the human path. `hub status` counts a running session as *waiting* when its attention is set or its turn is `waiting`.
