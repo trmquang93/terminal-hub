@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { encodeCwd } from '../src/main/claude';
-import { NO_ID_NOTE, NO_TRANSCRIPT_NOTE, renderClaudeTranscript, renderOpencodeTranscript, renderTranscript, UNAVAILABLE_NOTE } from '../src/main/transcript';
+import { NO_ID_NOTE, NO_TRANSCRIPT_NOTE, renderClaudeTranscript, renderOpencodeTranscript, renderTranscript, transcriptHasAssistantText, UNAVAILABLE_NOTE } from '../src/main/transcript';
 import type { AgentInfo } from '../src/shared/types';
 
 const CLAUDE_ID = '9b2f6c1e-4d1a-4c55-9a0e-0d3f6b7a1c11';
@@ -52,6 +52,43 @@ describe('renderClaudeTranscript', () => {
     const link = join(cwd, '..', 'link');
     execFileSync('ln', ['-s', cwd, link]);
     expect(renderClaudeTranscript(configDir, link, CLAUDE_ID)).toContain('hi');
+  });
+
+  it('shows thinking and tool calls when a run has no text of its own, so a killed run is never blank', () => {
+    const { configDir, cwd } = transcript([
+      row({ type: 'user', isSidechain: false, message: { role: 'user', content: 'launch the repro app' } }),
+      row({ type: 'assistant', isSidechain: false, message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'I will build the app first' }] } }),
+      row({ type: 'assistant', isSidechain: false, message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm run package:app', description: 'build' } }] } }),
+      row({ type: 'assistant', isSidechain: false, message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Read', input: { file_path: '/tmp/a.ts' } }] } }),
+    ]);
+    expect(renderClaudeTranscript(configDir, cwd, CLAUDE_ID)).toBe(
+      ['── user ──', 'launch the repro app', '', '── assistant ──', '(thinking) I will build the app first', '[tool: Bash — npm run package:app]', '[tool: Read — /tmp/a.ts]', ''].join('\n'),
+    );
+  });
+
+  it('leaves thinking and tool calls out of a run that has text, and truncates a long thinking block in one that has none', () => {
+    const { configDir, cwd } = transcript([
+      row({ type: 'assistant', isSidechain: false, message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'hidden plan' }] } }),
+      row({ type: 'assistant', isSidechain: false, message: { role: 'assistant', content: [{ type: 'text', text: 'Answered.' }] } }),
+      row({ type: 'assistant', isSidechain: true, message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'sidechain plan' }] } }),
+    ]);
+    expect(renderClaudeTranscript(configDir, cwd, CLAUDE_ID)).toBe('── assistant ──\nAnswered.\n');
+    const long = transcript([row({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'x'.repeat(900) }] } })]);
+    const line = renderClaudeTranscript(long.configDir, long.cwd, CLAUDE_ID).split('\n')[1] ?? '';
+    expect(line.endsWith('…')).toBe(true);
+    expect(line.length).toBe('(thinking) '.length + 500);
+  });
+
+  it('reports whether the agent ever wrote assistant text, so a prompt-only transcript can fall back to its last screen', () => {
+    const onlyTools = transcript([
+      row({ type: 'user', message: { content: 'go' } }),
+      row({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'plan' }, { type: 'tool_use', name: 'Bash', input: { command: 'ls' } }] } }),
+    ]);
+    const agent = (dir: { configDir: string; cwd: string }): AgentInfo => ({ provider: 'claude', configDir: dir.configDir, sessionId: CLAUDE_ID, argvTemplate: [], resumeCommand: '' });
+    expect(transcriptHasAssistantText(agent(onlyTools), onlyTools.cwd)).toBe(false);
+    expect(transcriptHasAssistantText({ ...agent(onlyTools), sessionId: null }, onlyTools.cwd)).toBe(false);
+    const withText = transcript([row({ type: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } })]);
+    expect(transcriptHasAssistantText(agent(withText), withText.cwd)).toBe(true);
   });
 
   it('says there is no transcript yet when the file is missing or has no text', () => {

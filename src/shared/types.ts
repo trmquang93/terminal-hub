@@ -71,6 +71,8 @@ export interface SessionMeta {
   endedAt: string | null;
   exitCode: number | null;
   signal: number | null;
+  /** Why the pty ended, in words: `app-quit`, `SIGTERM (sent from outside the app)`, `exit code 1`. Absent in older meta.json files. */
+  exitCause?: string | null;
   cols: number;
   rows: number;
   bytesWritten: number;
