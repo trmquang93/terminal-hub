@@ -94,33 +94,53 @@ function SessionRow({ session, selected, selectMode, checked, onSelect, onDelete
 }
 
 function SessionGroups({ sessions, actions }: { sessions: SessionInfo[]; actions: RowActions }) {
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  const toggle = (cwd: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(cwd)) next.add(cwd);
+      return next;
+    });
   return (
     <>
-      {groupSessions(sessions).map((group) => (
-        <li key={group.cwd} className="group">
-          <div className="group-head" title={group.cwd}>
-            <div className="group-title">
-              <strong>{group.name}</strong>
-              <span className="group-count" title={`${group.sessions.length} sessions`}>{group.sessions.length}</span>
-            </div>
-            <span className="cwd">{shortenPath(group.cwd, actions.home)}</span>
-          </div>
-          <ul className="group-sessions">
-            {group.sessions.map((session) => (
-              <SessionRow
-                key={session.id}
-                session={session}
-                selected={session.id === actions.selectedId}
-                selectMode={actions.selectMode}
-                checked={actions.checked.has(session.id)}
-                onSelect={() => actions.onSelect(session.id)}
-                onDelete={() => actions.onDelete(session.id)}
-                onArchive={(archived) => actions.onArchive(session.id, archived)}
-              />
-            ))}
-          </ul>
-        </li>
-      ))}
+      {groupSessions(sessions).map((group) => {
+        const open = !collapsed.has(group.cwd);
+        return (
+          <li key={group.cwd} className={open ? 'group' : 'group collapsed'}>
+            <button
+              type="button"
+              className="group-head"
+              title={group.cwd}
+              aria-expanded={open}
+              aria-label={`${open ? 'Collapse' : 'Expand'} ${group.name} sessions`}
+              onClick={() => toggle(group.cwd)}
+            >
+              <span className="group-title">
+                <span className="group-chevron" aria-hidden="true">▾</span>
+                <strong>{group.name}</strong>
+                <span className="group-count" title={`${group.sessions.length} sessions`}>{group.sessions.length}</span>
+              </span>
+              <span className="cwd">{shortenPath(group.cwd, actions.home)}</span>
+            </button>
+            {open && (
+              <ul className="group-sessions">
+                {group.sessions.map((session) => (
+                  <SessionRow
+                    key={session.id}
+                    session={session}
+                    selected={session.id === actions.selectedId}
+                    selectMode={actions.selectMode}
+                    checked={actions.checked.has(session.id)}
+                    onSelect={() => actions.onSelect(session.id)}
+                    onDelete={() => actions.onDelete(session.id)}
+                    onArchive={(archived) => actions.onArchive(session.id, archived)}
+                  />
+                ))}
+              </ul>
+            )}
+          </li>
+        );
+      })}
     </>
   );
 }
