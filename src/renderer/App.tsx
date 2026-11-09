@@ -32,15 +32,79 @@ interface RowActions {
   onArchive: (id: string, archived: boolean) => void;
 }
 
+interface SessionMenuPosition {
+  x: number;
+  y: number;
+}
+
 function SessionRow({ session, selected, selectMode, checked, onSelect, onDelete, onArchive }: { session: SessionInfo; selected: boolean; selectMode: boolean; checked: boolean; onSelect: () => void; onDelete: () => void; onArchive: (archived: boolean) => void }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.title);
+  const [menu, setMenu] = useState<SessionMenuPosition | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const suppressNextOpen = useRef(false);
   const commit = (): void => {
     setEditing(false);
     if (draft.trim() && draft.trim() !== session.title) void window.hub.renameSession(session.id, draft.trim());
   };
+  const startRename = (): void => {
+    setDraft(session.title);
+    setEditing(true);
+  };
+  const openMenu = useCallback((x: number, y: number): void => {
+    setMenu({ x: Math.min(x, window.innerWidth - 200), y: Math.min(y, window.innerHeight - 190) });
+  }, []);
+  const copyId = (): void => {
+    void navigator.clipboard.writeText(session.id).catch(() => undefined);
+    setMenu(null);
+  };
+
+  useEffect(() => {
+    if (!menu) return;
+    menuRef.current?.querySelector('button')?.focus();
+    const onMouseDown = (event: MouseEvent): void => {
+      if (menuRef.current && event.target instanceof Node && menuRef.current.contains(event.target)) return;
+      if (event.button === 2) {
+        // A right-click closes this menu; the contextmenu handler must not reopen it in the same gesture.
+        suppressNextOpen.current = true;
+        setTimeout(() => (suppressNextOpen.current = false), 0);
+      }
+      setMenu(null);
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setMenu(null);
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [menu]);
+
   return (
-    <li className={`session${selected && !selectMode ? ' selected' : ''}${checked ? ' checked' : ''}${session.archived ? ' archived' : ''}`} onClick={onSelect}>
+    <li
+      className={`session${selected && !selectMode ? ' selected' : ''}${checked ? ' checked' : ''}${session.archived ? ' archived' : ''}`}
+      onClick={onSelect}
+      tabIndex={0}
+      aria-haspopup="menu"
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (suppressNextOpen.current) {
+          suppressNextOpen.current = false;
+          return;
+        }
+        openMenu(event.clientX, event.clientY);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+          event.preventDefault();
+          const rect = event.currentTarget.getBoundingClientRect();
+          openMenu(rect.left + 24, rect.top + 20);
+        }
+      }}
+    >
       <div className="session-head">
         {selectMode && <input className="check" type="checkbox" checked={checked} onChange={onSelect} onClick={(event) => event.stopPropagation()} />}
         {editing ? (
@@ -59,11 +123,8 @@ function SessionRow({ session, selected, selectMode, checked, onSelect, onDelete
         ) : (
           <span
             className="title"
-            title="Double-click to rename"
-            onDoubleClick={() => {
-              setDraft(session.title);
-              setEditing(true);
-            }}
+            title="Double-click to rename · right-click (or Shift+F10) for the session menu, including Copy Session ID"
+            onDoubleClick={startRename}
           >
             {session.title}
           </span>
@@ -89,6 +150,52 @@ function SessionRow({ session, selected, selectMode, checked, onSelect, onDelete
         started {formatTime(session.startedAt)}
         {session.endedAt && <> · ended {formatTime(session.endedAt)}</>}
       </div>
+      {menu && (
+        <div
+          className="session-menu"
+          role="menu"
+          ref={menuRef}
+          style={{ left: menu.x, top: menu.y }}
+          onContextMenu={(event) => event.preventDefault()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button type="button" role="menuitem" onClick={copyId}>
+            Copy Session ID
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setMenu(null);
+              startRename();
+            }}
+          >
+            Rename…
+          </button>
+          {!session.running && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setMenu(null);
+                onArchive(!session.archived);
+              }}
+            >
+              {session.archived ? 'Unarchive' : 'Archive'}
+            </button>
+          )}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setMenu(null);
+              onDelete();
+            }}
+          >
+            Delete
+          </button>
+        </div>
+      )}
     </li>
   );
 }
