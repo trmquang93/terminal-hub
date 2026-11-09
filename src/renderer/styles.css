@@ -32,9 +32,13 @@ input, select { background: #1d2026; border: 1px solid #353a44; border-radius: 6
 .select-bar { display: flex; align-items: center; gap: 6px; padding: 0 12px 8px; }
 .select-bar .count { flex: 1; color: #8b929e; }
 .select-bar button { padding: 3px 8px; }
-.group { list-style: none; margin-bottom: 6px; }
-.group-head { display: flex; flex-direction: column; padding: 6px 10px 2px; }
-.group-head strong { font-size: 12px; color: #aeb5c1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group { list-style: none; margin-top: 10px; }
+.group-head { position: sticky; top: 0; z-index: 1; display: flex; flex-direction: column; gap: 1px; margin: 0 -8px; padding: 8px 18px 4px; background: #1a1d22; border-top: 1px solid #2a2e36; }
+.group-title { display: flex; align-items: center; gap: 8px; }
+.group-head strong { flex: 1; min-width: 0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: #d6dbe3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-count { flex: none; font-size: 10px; line-height: 14px; min-width: 18px; padding: 0 5px; text-align: center; border-radius: 7px; background: #262a32; color: #8b929e; }
+.group-head .cwd { font-size: 11px; color: #6f7682; }
+.group > .group-sessions { list-style: none; margin: 4px 0 0 10px; padding: 0 0 0 6px; border-left: 2px solid #2a2e36; }
 .group-sessions { list-style: none; margin: 0; padding: 0; }
 .archived-section { list-style: none; border-top: 1px solid #2a2e36; margin-top: 6px; padding-top: 6px; }
 .archived-toggle { width: 100%; text-align: left; background: none; border: none; color: #8b929e; }

@@ -99,7 +99,10 @@ function SessionGroups({ sessions, actions }: { sessions: SessionInfo[]; actions
       {groupSessions(sessions).map((group) => (
         <li key={group.cwd} className="group">
           <div className="group-head" title={group.cwd}>
-            <strong>{group.name}</strong>
+            <div className="group-title">
+              <strong>{group.name}</strong>
+              <span className="group-count" title={`${group.sessions.length} sessions`}>{group.sessions.length}</span>
+            </div>
             <span className="cwd">{shortenPath(group.cwd, actions.home)}</span>
           </div>
           <ul className="group-sessions">
