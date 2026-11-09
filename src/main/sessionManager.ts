@@ -188,7 +188,7 @@ export class SessionManager implements SessionService {
     const meta = this.require(id);
     if (!meta.claude) {
       const total = this.store.size(id);
-      const start = Math.max(0, total - tailBytes);
+      const start = Math.max(this.store.startOffset(id), total - tailBytes);
       return { data: await this.store.readOutput(id, start, total - start), start, total, source: 'log' };
     }
     if (!this.live.has(id)) {

@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { SessionMeta } from '../src/shared/types';
-import { SessionStore } from '../src/main/sessionStore';
+import { KEEP_LINES, SessionStore, TRIM_AFTER_LINES } from '../src/main/sessionStore';
 
 let root: string;
 let store: SessionStore;
@@ -129,5 +129,105 @@ describe('SessionStore', () => {
     expect(() => store.delete('../victim')).toThrow(/invalid session id/);
     expect(existsSync(join(root, '..', 'victim', 'keep'))).toBe(true);
     rmSync(join(root, '..', 'victim'), { recursive: true });
+  });
+
+  describe('output.log cap', () => {
+    const lines = (from: number, to: number): string => Array.from({ length: to - from + 1 }, (_, i) => `line ${from + i}\n`).join('');
+    const onDisk = (): string => readFileSync(join(root, A, 'output.log'), 'utf8');
+
+    it('keeps exactly the last KEEP_LINES complete lines once the file passes TRIM_AFTER_LINES', () => {
+      store.create(meta(A));
+      store.appendOutput(A, Buffer.from(lines(1, TRIM_AFTER_LINES + 50)));
+      store.flush(A);
+      expect(onDisk()).toBe(lines(TRIM_AFTER_LINES + 50 - KEEP_LINES + 1, TRIM_AFTER_LINES + 50));
+    });
+
+    it('does not rewrite at TRIM_AFTER_LINES, only past it', () => {
+      store.create(meta(A));
+      store.appendOutput(A, Buffer.from(lines(1, TRIM_AFTER_LINES)));
+      store.flush(A);
+      expect(onDisk()).toBe(lines(1, TRIM_AFTER_LINES));
+      store.appendOutput(A, Buffer.from(lines(TRIM_AFTER_LINES + 1, TRIM_AFTER_LINES + 1)));
+      store.flush(A);
+      expect(onDisk()).toBe(lines(TRIM_AFTER_LINES + 2 - KEEP_LINES, TRIM_AFTER_LINES + 1));
+    });
+
+    it('leaves no partial first line and drops a partial tail fragment', () => {
+      store.create(meta(A));
+      store.appendOutput(A, Buffer.from(`${lines(1, TRIM_AFTER_LINES + 10)}par`));
+      store.flush(A);
+      expect(onDisk()).toBe(lines(TRIM_AFTER_LINES + 10 - KEEP_LINES + 1, TRIM_AFTER_LINES + 10));
+    });
+
+    it('counts lines across flushes and trims when the running total passes the limit', () => {
+      store.create(meta(A));
+      for (let i = 1; i <= TRIM_AFTER_LINES + 1; i++) {
+        store.appendOutput(A, Buffer.from(lines(i, i)));
+        store.flush(A);
+      }
+      expect(onDisk()).toBe(lines(TRIM_AFTER_LINES + 2 - KEEP_LINES, TRIM_AFTER_LINES + 1));
+    });
+
+    it('trims an oversized log left by an earlier version on the next flush, in bounded reads', () => {
+      store.create(meta(A));
+      writeFileSync(join(root, A, 'output.log'), lines(1, 50000));
+      store.appendOutput(A, Buffer.from(lines(50001, 50001)));
+      store.flush(A);
+      expect(onDisk()).toBe(lines(50001 - KEEP_LINES + 1, 50001));
+    });
+
+    it('keeps live offsets increasing and correct across a trim: the next read is exactly the new output', async () => {
+      store.create(meta(A));
+      const first = lines(1, 300);
+      let sent = store.appendOutput(A, Buffer.from(first));
+      expect(sent).toBe(first.length);
+      expect((await store.readOutput(A, 0, sent)).toString()).toBe(first);
+
+      // This append crosses TRIM_AFTER_LINES, so the flush inside readChunks trims the file.
+      const second = lines(301, 450);
+      const end = store.appendOutput(A, Buffer.from(second));
+      expect(end).toBe(sent + second.length);
+      let got = '';
+      for await (const data of store.readChunks(A, sent, store.size(A))) got += data.toString();
+      expect(got).toBe(second);
+      expect(onDisk()).toBe(lines(451 - KEEP_LINES, 450));
+      expect(store.size(A)).toBe(end);
+      expect(store.startOffset(A)).toBe(end - onDisk().length);
+      sent = end;
+
+      // Output after the trim continues from the same offset: nothing replayed, nothing skipped.
+      const third = lines(451, 460);
+      const after = store.appendOutput(A, Buffer.from(third));
+      expect(after).toBe(sent + third.length);
+      expect((await store.readOutput(A, sent)).toString()).toBe(third);
+      expect(onDisk()).toBe(lines(451 - KEEP_LINES, 460));
+
+      // An offset from before the trim only gets what survives of it.
+      expect((await store.readOutput(A, 0)).toString()).toBe(onDisk());
+      store.close(A);
+      expect(store.size(A)).toBe(after);
+      store.appendOutput(A, Buffer.from('x\n'));
+      expect(store.size(A)).toBe(after + 2);
+    });
+
+    it('keeps a trimmed log readable after a restart', async () => {
+      store.create(meta(A, { state: 'exited' }));
+      store.appendOutput(A, Buffer.from(lines(1, 500)));
+      store.close(A);
+      const reopened = new SessionStore(root);
+      expect(reopened.loadAll()[0]?.bytesWritten).toBe(lines(501 - KEEP_LINES, 500).length);
+      expect((await reopened.readOutput(A)).toString()).toBe(lines(501 - KEEP_LINES, 500));
+    });
+
+    it('never writes input.log or any file but meta.json and output.log for a shell, and only meta.json for an agent', () => {
+      store.create(meta(A));
+      store.appendOutput(A, Buffer.from(lines(1, 500)));
+      store.close(A);
+      expect(readdirSync(join(root, A)).sort()).toEqual(['meta.json', 'output.log']);
+      const agent = { provider: 'claude' as const, configDir: '/tmp', sessionId: null, argvTemplate: [], resumeCommand: '' };
+      store.create(meta(B, { claude: agent }));
+      store.writeMeta(meta(B, { claude: agent, title: 'renamed' }));
+      expect(readdirSync(join(root, B))).toEqual(['meta.json']);
+    });
   });
 });
