@@ -33,7 +33,21 @@ input, select { background: #1d2026; border: 1px solid #353a44; border-radius: 6
 .select-bar .count { flex: 1; color: #8b929e; }
 .select-bar button { padding: 3px 8px; }
 .group { list-style: none; margin-top: 10px; }
-.group-head { position: sticky; top: 0; z-index: 1; display: flex; flex-direction: column; gap: 1px; width: calc(100% + 16px); margin: 0 -8px; padding: 8px 18px 4px; background: #1a1d22; border: none; border-top: 1px solid #2a2e36; border-radius: 0; text-align: left; }
+.group-bar { position: sticky; top: 0; z-index: 1; }
+.group-head { display: flex; flex-direction: column; gap: 1px; width: calc(100% + 16px); margin: 0 -8px; padding: 8px 18px 4px; background: #1a1d22; border: none; border-top: 1px solid #2a2e36; border-radius: 0; text-align: left; }
+.group-mode { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 12px 8px; }
+.group-mode button { padding: 3px 8px; }
+.segmented { display: flex; }
+.segmented button { border-radius: 0; }
+.segmented button:first-child { border-radius: 6px 0 0 6px; }
+.segmented button:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+.segmented button[aria-pressed="true"] { background: #2a3140; border-color: #2f6feb; position: relative; }
+.group-grip { position: absolute; top: 6px; right: 40px; padding: 0 4px; background: none; border: none; font-size: 12px; line-height: 14px; letter-spacing: -2px; color: #8b929e; cursor: grab; opacity: 0; }
+.group-bar:hover .group-grip, .group-grip:focus-visible { opacity: 1; }
+.group-grip:focus-visible { outline: 2px solid #2f6feb; border-radius: 4px; }
+.group.dragging { opacity: 0.5; }
+.group.drop-before { box-shadow: 0 -2px 0 #2f6feb; }
+.group.drop-after { box-shadow: 0 2px 0 #2f6feb; }
 button.group-head:hover { background: #1f2329; }
 .group-head:focus-visible { outline: 2px solid #2f6feb; outline-offset: -2px; }
 .group-title { display: flex; align-items: center; gap: 8px; }

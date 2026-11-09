@@ -9,6 +9,7 @@ function subscribe<T>(channel: string, callback: (payload: T) => void): () => vo
 
 const api: HubApi = {
   defaults: () => ipcRenderer.invoke('hub:defaults'),
+  repoRoots: (cwds) => ipcRenderer.invoke('hub:repoRoots', cwds),
   listSessions: () => ipcRenderer.invoke('hub:list'),
   createSession: (options) => ipcRenderer.invoke('hub:create', options),
   sendInput: (id, data) => ipcRenderer.send('hub:input', id, data),

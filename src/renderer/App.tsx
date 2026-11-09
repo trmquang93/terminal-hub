@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HubDefaults, SessionInfo, StartSessionOptions, UpdaterStatus } from '../shared/types';
 import { formatTime, shortenPath } from './format';
-import { groupSessions } from './grouping';
+import { groupKeyFor, groupSessions, parseGroupMode, parseGroupOrder, reorderSaved, type GroupMode } from './grouping';
 import { NewSessionDialog } from './NewSessionDialog';
 import { TerminalView } from './TerminalView';
 
@@ -93,17 +93,30 @@ function SessionRow({ session, selected, selectMode, checked, onSelect, onDelete
   );
 }
 
-function SessionGroups({ sessions, actions, collapsible = true }: { sessions: SessionInfo[]; actions: RowActions; collapsible?: boolean }) {
+interface DropTarget {
+  key: string;
+  after: boolean;
+}
+
+function SessionGroups({ sessions, actions, keyOf, order, onReorder, collapsible = true }: { sessions: SessionInfo[]; actions: RowActions; keyOf: (session: SessionInfo) => string; order?: readonly string[]; onReorder?: (displayed: string[], key: string, target: string, after: boolean) => void; collapsible?: boolean }) {
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  const [dragKey, setDragKey] = useState<string | null>(null);
+  const [drop, setDrop] = useState<DropTarget | null>(null);
   const toggle = (cwd: string) =>
     setCollapsed((prev) => {
       const next = new Set(prev);
       if (!next.delete(cwd)) next.add(cwd);
       return next;
     });
+  const groups = groupSessions(sessions, { keyOf, order });
+  const keys = groups.map((group) => group.cwd);
+  const endDrag = (): void => {
+    setDragKey(null);
+    setDrop(null);
+  };
   return (
     <>
-      {groupSessions(sessions).map((group) => {
+      {groups.map((group, index) => {
         const open = !collapsible || !collapsed.has(group.cwd);
         const head = (
           <>
@@ -115,22 +128,69 @@ function SessionGroups({ sessions, actions, collapsible = true }: { sessions: Se
             <span className="cwd">{shortenPath(group.cwd, actions.home)}</span>
           </>
         );
+        const dropClass = drop?.key === group.cwd && dragKey !== group.cwd ? (drop.after ? ' drop-after' : ' drop-before') : '';
+        const neighbour = (offset: number): string | undefined => keys[index + offset];
         return (
-          <li key={group.cwd} className={open ? 'group' : 'group collapsed'}>
-            {collapsible ? (
-              <button
-                type="button"
-                className="group-head"
-                title={group.cwd}
-                aria-expanded={open}
-                aria-label={`${open ? 'Collapse' : 'Expand'} ${group.name} sessions`}
-                onClick={() => toggle(group.cwd)}
-              >
-                {head}
-              </button>
-            ) : (
-              <div className="group-head" title={group.cwd}>{head}</div>
-            )}
+          <li
+            key={group.cwd}
+            className={`${open ? 'group' : 'group collapsed'}${dragKey === group.cwd ? ' dragging' : ''}${dropClass}`}
+            onDragOver={
+              dragKey === null || !onReorder
+                ? undefined
+                : (event) => {
+                    event.preventDefault();
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    const after = event.clientY > rect.top + rect.height / 2;
+                    setDrop((prev) => (prev?.key === group.cwd && prev.after === after ? prev : { key: group.cwd, after }));
+                  }
+            }
+            onDrop={(event) => {
+              event.preventDefault();
+              if (dragKey !== null && drop) onReorder?.(keys, dragKey, drop.key, drop.after);
+              endDrag();
+            }}
+          >
+            <div className="group-bar">
+              {collapsible ? (
+                <button
+                  type="button"
+                  className="group-head"
+                  title={group.cwd}
+                  aria-expanded={open}
+                  aria-label={`${open ? 'Collapse' : 'Expand'} ${group.name} sessions`}
+                  onClick={() => toggle(group.cwd)}
+                >
+                  {head}
+                </button>
+              ) : (
+                <div className="group-head" title={group.cwd}>{head}</div>
+              )}
+              {onReorder && (
+                <button
+                  type="button"
+                  className="group-grip"
+                  draggable
+                  title="Drag to reorder (Alt+↑/↓)"
+                  aria-label={`Reorder ${group.name} group`}
+                  onDragStart={(event) => {
+                    event.dataTransfer.effectAllowed = 'move';
+                    event.dataTransfer.setData('text/plain', group.cwd);
+                    const item = event.currentTarget.closest('li');
+                    if (item) event.dataTransfer.setDragImage(item, 12, 12);
+                    setDragKey(group.cwd);
+                  }}
+                  onDragEnd={endDrag}
+                  onKeyDown={(event) => {
+                    if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
+                    event.preventDefault();
+                    const target = neighbour(event.key === 'ArrowUp' ? -1 : 1);
+                    if (target !== undefined) onReorder(keys, group.cwd, target, event.key === 'ArrowDown');
+                  }}
+                >
+                  ⋮⋮
+                </button>
+              )}
+            </div>
             {open && (
               <ul className="group-sessions">
                 {group.sessions.map((session) => (
@@ -229,6 +289,9 @@ function Banner({ session }: { session: SessionInfo }) {
   );
 }
 
+const GROUP_MODE_KEY = 'terminalHub.groupMode';
+const groupOrderKey = (mode: GroupMode): string => `terminalHub.groupOrder.${mode}`;
+
 export function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -239,6 +302,12 @@ export function App() {
   const [selectMode, setSelectMode] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [archivedOpen, setArchivedOpen] = useState(false);
+  const [groupMode, setGroupMode] = useState<GroupMode>(() => parseGroupMode(localStorage.getItem(GROUP_MODE_KEY)));
+  const [groupOrders, setGroupOrders] = useState<Record<GroupMode, string[]>>(() => ({
+    folder: parseGroupOrder(localStorage.getItem(groupOrderKey('folder'))),
+    repo: parseGroupOrder(localStorage.getItem(groupOrderKey('repo'))),
+  }));
+  const [repoRoots, setRepoRoots] = useState<Record<string, string | null>>({});
   const announced = useRef(new Map<string, string>());
 
   const refreshDefaults = useCallback(() => window.hub.defaults().then(setDefaults), []);
@@ -282,6 +351,33 @@ export function App() {
 
   const unarchived = useMemo(() => sessions.filter((session) => !session.archived), [sessions]);
   const archived = useMemo(() => sessions.filter((session) => session.archived), [sessions]);
+  const cwdKey = useMemo(() => [...new Set(sessions.map((session) => session.cwd))].sort().join('\n'), [sessions]);
+
+  useEffect(() => {
+    if (groupMode !== 'repo' || cwdKey === '') return;
+    const missing = cwdKey.split('\n').filter((cwd) => !(cwd in repoRoots));
+    if (missing.length === 0) return;
+    let live = true;
+    void window.hub.repoRoots(missing).then((roots) => live && setRepoRoots((prev) => ({ ...prev, ...roots })));
+    return () => {
+      live = false;
+    };
+  }, [groupMode, cwdKey, repoRoots]);
+
+  const keyOf = useMemo(() => groupKeyFor(groupMode, repoRoots), [groupMode, repoRoots]);
+  const order = groupOrders[groupMode];
+
+  function chooseGroupMode(mode: GroupMode): void {
+    setGroupMode(mode);
+    localStorage.setItem(GROUP_MODE_KEY, mode);
+  }
+
+  function saveGroupOrder(mode: GroupMode, next: string[]): void {
+    setGroupOrders((prev) => ({ ...prev, [mode]: next }));
+    if (next.length === 0) localStorage.removeItem(groupOrderKey(mode));
+    else localStorage.setItem(groupOrderKey(mode), JSON.stringify(next));
+  }
+
   const selected = sessions.find((session) => session.id === selectedId) ?? null;
 
   function endSelectMode(): void {
@@ -340,8 +436,22 @@ export function App() {
             </button>
           )}
         </div>
+        <div className="group-mode">
+          <span className="segmented" role="group" aria-label="Group sessions by">
+            {(['folder', 'repo'] as const).map((mode) => (
+              <button key={mode} aria-pressed={groupMode === mode} onClick={() => chooseGroupMode(mode)}>
+                {mode === 'folder' ? 'Folder' : 'Repo'}
+              </button>
+            ))}
+          </span>
+          {order.length > 0 && (
+            <button title="Clear the saved group order for this view" onClick={() => saveGroupOrder(groupMode, [])}>
+              Reset order
+            </button>
+          )}
+        </div>
         <ul className="sessions">
-          <SessionGroups sessions={unarchived} actions={actions} />
+          <SessionGroups sessions={unarchived} actions={actions} keyOf={keyOf} order={order} onReorder={(displayed, key, target, after) => saveGroupOrder(groupMode, reorderSaved(order, displayed, key, target, after))} />
           {sessions.length === 0 && <li className="empty">No sessions yet.</li>}
           {sessions.length > 0 && unarchived.length === 0 && <li className="empty">No sessions outside the archive.</li>}
           {archived.length > 0 && (
@@ -351,7 +461,7 @@ export function App() {
               </button>
               {archivedOpen && (
                 <ul className="group-sessions">
-                  <SessionGroups sessions={archived} actions={actions} collapsible={false} />
+                  <SessionGroups sessions={archived} actions={actions} keyOf={keyOf} collapsible={false} />
                 </ul>
               )}
             </li>

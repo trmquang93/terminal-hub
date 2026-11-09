@@ -133,6 +133,8 @@ export interface UpdaterStatus {
 
 export interface HubApi {
   defaults(): Promise<HubDefaults>;
+  /** Git top-level (nearest ancestor with a `.git` entry) per cwd; null when the cwd is outside a repo. */
+  repoRoots(cwds: string[]): Promise<Record<string, string | null>>;
   listSessions(): Promise<SessionInfo[]>;
   createSession(options: StartSessionOptions): Promise<string>;
   sendInput(id: string, data: string): void;
