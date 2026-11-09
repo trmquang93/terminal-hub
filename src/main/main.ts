@@ -10,7 +10,8 @@ import { NotificationThrottle } from './attention';
 import { AttentionNotifier } from './attentionNotifier';
 import { createHookRefresher } from './claudeHooks';
 import { loadNotifyConfig } from './notifyConfig';
-import { createSender, NotifyLog } from './notifyDelivery';
+import { NotifyLog } from './notifyDelivery';
+import { SessionListeners } from './sessionListeners';
 import { dataDir } from './paths';
 import { SessionManager } from './sessionManager';
 import { SessionStore } from './sessionStore';
@@ -28,9 +29,11 @@ app.setPath('userData', join(dir, 'electron'));
 
 let window: BrowserWindow | null = null;
 let manager: SessionManager;
+let listeners: SessionListeners | null = null;
 let notifier: AttentionNotifier | null = null;
 let updater: Updater | null = null;
 let apiServer: Server | null = null;
+let apiBaseUrl: string | null = null;
 let quitting = false;
 const startedAt = new Date().toISOString();
 
@@ -204,18 +207,42 @@ async function startServices(): Promise<void> {
     (level, message) => notifyLog.write(level, message),
   );
   hooksFile();
-  manager = new SessionManager(new SessionStore(join(dir, 'sessions')), app.getVersion(), { baseEnv, hooksFile, log: (message) => notifyLog.write('INFO', message) });
+  manager = new SessionManager(new SessionStore(join(dir, 'sessions')), app.getVersion(), {
+    baseEnv,
+    hooksFile,
+    log: (message) => notifyLog.write('INFO', message),
+    listenerInfo: (id) => listeners?.list(id) ?? [],
+  });
+  listeners = new SessionListeners({
+    dataDir: dir,
+    sessionsRoot: join(dir, 'sessions'),
+    startSession: (options) => manager.start(options),
+    getSession: (id) => manager.get(id),
+    log: (level, message) => notifyLog.write(level, message),
+    apiBaseUrl: () => apiBaseUrl,
+  });
   const token = loadOrCreateToken(dir);
   notifier = new AttentionNotifier({
-    send: createSender(dir, notifyLog),
+    send: (event) => {
+      const session = manager.get(event.session.id);
+      if (session) listeners?.publish(event, session);
+      return Promise.resolve();
+    },
     secrets: () => [token, loadNotifyConfig(dir).config?.bearer ?? ''],
     onDrop: (event) => notifyLog.write('WARN', `${event.event} session=${event.session.id.slice(0, 8)} dropped: delivery queue full`),
   });
-  manager.onChanged((session) => notifier?.update(session));
-  manager.onRemoved((id) => notifier?.forget(id));
-  apiServer = createApiServer({ service: manager, token, version: app.getVersion(), startedAt });
+  manager.onChanged((session) => {
+    notifier?.update(session);
+    if (!session.running) listeners?.publishExit(session);
+  });
+  manager.onRemoved((id) => {
+    notifier?.forget(id);
+    listeners?.forget(id);
+  });
+  apiServer = createApiServer({ service: manager, token, version: app.getVersion(), startedAt, ...(listeners ? { listeners } : {}) });
   const port = await listenOnLoopback(apiServer);
-  writeApiFile(dir, { baseUrl: `http://127.0.0.1:${port}`, token, pid: process.pid });
+  apiBaseUrl = `http://127.0.0.1:${port}`;
+  writeApiFile(dir, { baseUrl: apiBaseUrl, token, pid: process.pid });
   updater = new Updater({
     manager,
     isPackaged: app.isPackaged,
@@ -238,6 +265,7 @@ async function shutdown(): Promise<void> {
   apiServer?.closeAllConnections();
   await manager.shutdown();
   await notifier?.drain(NOTIFY_DRAIN_MS);
+  await listeners?.drain(NOTIFY_DRAIN_MS);
   app.exit(0);
 }
 

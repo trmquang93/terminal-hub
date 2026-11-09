@@ -5,15 +5,22 @@ import type { AnswerRequest, AutoAnswerPolicy, SessionInfo, StartSessionOptions 
 import { AnsiStripper } from './ansi';
 import { HubError } from './errors';
 import type { OutputChunk, SessionService } from './service';
+import type { SessionListeners } from './sessionListeners';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const SESSION_ROUTE = /^\/sessions\/([^/]+)(?:\/([a-z]+))?$/;
+const LISTENERS_ROUTE = /^\/sessions\/([^/]+)\/listeners(?:\/([^/]+))?(?:\/(resume))?$/;
+const EVENTS_ROUTE = /^\/sessions\/([^/]+)\/events$/;
+const DELIVERIES_ROUTE = /^\/sessions\/([^/]+)\/deliveries$/;
+const HANDSHAKE_ROUTE = /^\/handshakes\/([^/]+)(\/ack)?$/;
 
 export interface ApiOptions {
   service: SessionService;
   token: string;
   version: string;
   startedAt: string;
+  /** Per-session listeners and their handshakes. Without it POST /sessions rejects every create (no listener means no session). */
+  listeners?: SessionListeners;
 }
 
 function digest(value: string): Buffer {
@@ -96,6 +103,12 @@ function parseAutoAnswer(policy: Partial<AutoAnswerPolicy> | null | undefined): 
     return { enabled: policy.enabled, rules: policy.rules, timeoutSec: policy.timeoutSec };
   }
   throw new HubError(400, 'autoAnswer must be { enabled: boolean, rules: [{ match, keys }], timeoutSec: number >= 0 }');
+}
+
+function resolveSession(service: SessionService, id: string): string {
+  const session = service.get(id);
+  if (!session) throw new HubError(404, `no such session: ${id}`);
+  return session.id;
 }
 
 function numberParam(url: URL, name: string, fallback: number): number {
@@ -202,6 +215,15 @@ export function createApiServer(options: ApiOptions): Server {
       sendJson(res, 200, { ok: true, version: options.version, startedAt: options.startedAt, pid: process.pid });
       return;
     }
+    // The one route exempt from the API bearer: the one-time handshake token is the credential. Still loopback-only.
+    const handshake = HANDSHAKE_ROUTE.exec(url.pathname);
+    if (handshake && handshake[2] === '/ack' && method === 'POST') {
+      const { token: ackToken } = await readJson(req);
+      if (typeof ackToken !== 'string') throw new HubError(400, 'token must be a string');
+      if (!options.listeners) throw new HubError(404, `no such handshake: ${handshake[1] ?? ''}`);
+      return sendJson(res, 200, options.listeners.ack(handshake[1] as string, ackToken));
+    }
+
     if (!isAuthorized(req.headers.authorization, token)) {
       res.setHeader('WWW-Authenticate', 'Bearer');
       sendJson(res, 401, { error: 'missing or invalid bearer token' });
@@ -229,13 +251,64 @@ export function createApiServer(options: ApiOptions): Server {
       return sendJson(res, 200, { ok: true, deleted });
     }
 
+    if (handshake && handshake[2] === undefined && method === 'GET') {
+      if (!options.listeners) throw new HubError(404, `no such handshake: ${handshake[1] ?? ''}`);
+      return sendJson(res, 200, options.listeners.handshake(handshake[1] as string));
+    }
+
     if (url.pathname === '/sessions') {
       if (method === 'GET') return sendJson(res, 200, url.searchParams.get('attention') === '1' ? service.list().filter((item) => item.attention !== null) : service.list());
       if (method === 'POST') {
-        const created = service.start(parseStartOptions(await readJson(req)));
-        return sendJson(res, 201, { id: created.id });
+        const body = await readJson(req);
+        const start = parseStartOptions(body);
+        if (body.wait !== undefined && typeof body.wait !== 'boolean') throw new HubError(400, 'wait must be a boolean');
+        if (!Array.isArray(body.listeners) || body.listeners.length === 0) throw new HubError(400, 'listeners is required and must not be empty');
+        if (!options.listeners) throw new HubError(400, 'this hub has no listener service; a session cannot be created without listeners');
+        const result = await options.listeners.create({ ...start, wait: body.wait !== false }, body.listeners);
+        return sendJson(res, result.status, result.body);
       }
       throw new HubError(404, 'not found');
+    }
+
+    const listenerMatch = LISTENERS_ROUTE.exec(url.pathname);
+    if (listenerMatch) {
+      if (!options.listeners) throw new HubError(404, 'no listener service');
+      const sessionId = resolveSession(service, listenerMatch[1] as string);
+      const listenerId = listenerMatch[2];
+      if (listenerId === undefined) {
+        if (method === 'GET') return sendJson(res, 200, options.listeners.list(sessionId));
+        if (method === 'POST') {
+          const body = await readJson(req);
+          if (body.wait !== undefined && typeof body.wait !== 'boolean') throw new HubError(400, 'wait must be a boolean');
+          // `wait` is a route field, not part of the listener request (which rejects unknown keys).
+          const { wait, ...listener } = body;
+          const result = await options.listeners.addListener(sessionId, listener, wait !== false);
+          return sendJson(res, result.status, result.body);
+        }
+      } else if (listenerMatch[3] === 'resume' && method === 'POST') {
+        return sendJson(res, 200, options.listeners.resumeListener(sessionId, listenerId));
+      } else if (method === 'DELETE') {
+        options.listeners.remove(sessionId, listenerId);
+        return sendJson(res, 200, { ok: true });
+      }
+      throw new HubError(404, 'not found');
+    }
+
+    const eventsMatch = EVENTS_ROUTE.exec(url.pathname);
+    if (eventsMatch && method === 'GET') {
+      if (!options.listeners) throw new HubError(404, 'no listener service');
+      const sessionId = resolveSession(service, eventsMatch[1] as string);
+      const since = numberParam(url, 'since', 0);
+      const limit = url.searchParams.get('limit') === null ? undefined : Math.max(1, numberParam(url, 'limit', 200));
+      return sendJson(res, 200, options.listeners.events(sessionId, since, limit));
+    }
+
+    const deliveriesMatch = DELIVERIES_ROUTE.exec(url.pathname);
+    if (deliveriesMatch && method === 'GET') {
+      if (!options.listeners) throw new HubError(404, 'no listener service');
+      const sessionId = resolveSession(service, deliveriesMatch[1] as string);
+      const listener = url.searchParams.get('listener') ?? undefined;
+      return sendJson(res, 200, options.listeners.deliveries(sessionId, listener));
     }
 
     const match = SESSION_ROUTE.exec(url.pathname);
@@ -334,7 +407,7 @@ export function createApiServer(options: ApiOptions): Server {
         res.end();
         return;
       }
-      if (error instanceof HubError) sendJson(res, error.status, { error: error.message });
+      if (error instanceof HubError) sendJson(res, error.status, { error: error.message, ...(error.details ?? {}) });
       else {
         console.error(error);
         sendJson(res, 500, { error: 'internal error' });

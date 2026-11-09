@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { accessSync, constants, statSync } from 'node:fs';
 import { basename, delimiter, join } from 'node:path';
 import * as pty from 'node-pty';
-import type { AgentInfo, AnswerRequest, AttentionInfo, OutputSlice, SessionInfo, SessionMeta, StartSessionOptions } from '../shared/types';
+import type { AgentInfo, AnswerRequest, AttentionInfo, ListenerInfo, OutputSlice, SessionInfo, SessionMeta, StartSessionOptions } from '../shared/types';
 import { TurnTracker } from './agentState';
 import { stripAnsi } from './ansi';
 import { AttentionTracker, resolveAnswer, SAFE_UNATTENDED_POLICY } from './attention';
@@ -82,6 +82,8 @@ export interface ManagerOptions {
   hooksFile?: () => string | null;
   /** Diagnostics that are not errors (e.g. hook injection skipped). */
   log?: (message: string) => void;
+  /** The redacted listeners of a session, added to every SessionInfo the API returns. */
+  listenerInfo?: (id: string) => ListenerInfo[];
 }
 
 export interface HookNotification {
@@ -123,7 +125,16 @@ export class SessionManager implements SessionService {
   private info(meta: SessionMeta): SessionInfo {
     const running = this.live.has(meta.id);
     const resumable = !running && (meta.claude === null || meta.claude.sessionId !== null);
-    return { ...meta, titleSource: meta.titleSource ?? 'auto', running, resumable, attention: this.trackers.get(meta.id)?.attention ?? null, turn: running ? (this.turns.get(meta.id)?.turn ?? null) : null };
+    return {
+      ...meta,
+      titleSource: meta.titleSource ?? 'auto',
+      running,
+      resumable,
+      attention: this.trackers.get(meta.id)?.attention ?? null,
+      turn: running ? (this.turns.get(meta.id)?.turn ?? null) : null,
+      // A human-created session (the window's New Session / IPC path) has no listener: [] is a valid state, not an error.
+      listeners: this.options.listenerInfo?.(meta.id) ?? [],
+    };
   }
 
   list(): SessionInfo[] {

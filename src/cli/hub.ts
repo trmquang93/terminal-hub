@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { AttentionInfo, SessionInfo } from '../shared/types';
+import type { AttentionInfo, SessionInfo, ListenerRequest } from '../shared/types';
 import { loadNotifyConfig, notifyConfigPath } from '../main/notifyConfig';
 import { buildEvent, deliver, NotifyLog } from '../main/notifyDelivery';
 import { apiFilePath, dataDir } from '../main/paths';
@@ -14,6 +14,17 @@ const USAGE = `usage:
   hub run [--cwd DIR] [--title T] [--unattended] [-q] [--json] -- CMD ARGS…   start a session, follow it, exit with its exit code
   hub run --detach [--json] -- CMD ARGS…              start the session, print its id, exit 0 (never follows the output)
   hub run --wait [--timeout S] [--json] -- CMD ARGS…  start detached, then block like hub wait
+  hub run … --listen SPEC | --listen-file PATH        listeners are required; every one must ack before the session exists
+  hub listen <session> --listen SPEC [--listen-file PATH] [--ack-timeout S] [--json] [--no-wait]
+                                                      add a listener to a running session (same handshake)
+  hub ack <handshake-id> <token> [--json]              acknowledge a pending listener handshake
+  hub listeners <session> [--json]                     redacted listeners, state, pending/failed counters
+  hub listeners rm <session> <listener-id>             remove a listener now
+  hub listeners resume <session> <listener-id>         retry a degraded listener
+  hub events <session> [--since SEQ] [--follow] [--json]
+                                                      the session's event journal (survives restart)
+  hub deliveries <session> [--listener ID] [--limit N] [--json]
+                                                      delivery attempts per listener
   hub ls [--json]                                     list sessions (state, resumable, archived)
   hub show <id> [--json]                              one session: full id, state, running, exitCode, cwd, command, title, archived, resumable, attention, turn
   hub status [--json]                                 is the hub up: version, pid, startedAt, baseUrl, data dir, total / running / waiting counts
@@ -36,7 +47,15 @@ const USAGE = `usage:
   hub answer <id> --keys '1\\r'                       write raw keys (\\r \\n \\t \\e escapes)
   hub --help                                          this text (also: hub with no arguments), exit 0
 
---json (ls, show, status, run, wait, resize, rm-all): stdout carries exactly one JSON value. A failure prints {"error":"…","code":N} to stderr and exits with the same code.
+listener SPEC (repeatable; at least one is required on run, and for listen):
+  omb:<botId>/<threadId>              deliver to an OpenMausBot bot thread (needs omb-bridge.json in the data dir)
+  http:<url>                          POST each event as JSON
+  cmd:<argv0>[,<arg>…]                one JSON line on stdin, exit 0 = delivered; may print {"ack":"<token>"}
+  suffix #events=attention,turn,exit   event filter (default: all four)
+  http extras: #header=Name:Value (repeatable), #bearer-env=VAR
+  use --listen-file PATH for a JSON listener object when a secret must not land in shell history
+
+--json (ls, show, status, run, wait, resize, rm-all, listen, ack, listeners, events, deliveries): stdout carries exactly one JSON value. A failure prints {"error":"…","code":N} to stderr and exits with the same code.
 
 exit codes: 0 ok · 1 error · 2 hub not running · 10 attention needed (wait) · 124 timeout (wait) · otherwise the child's exit code (run, wait)
 
@@ -45,7 +64,7 @@ data dir: ${dataDir()}
 
 <id> may be any unique prefix of a session id.`;
 
-const JSON_COMMANDS = new Set(['ls', 'show', 'status', 'run', 'wait', 'resize', 'rm-all']);
+const JSON_COMMANDS = new Set(['ls', 'show', 'status', 'run', 'wait', 'resize', 'rm-all', 'listen', 'ack', 'listeners', 'events', 'deliveries']);
 
 /** `--json` counts for the commands that support it; for `run` only before the `--` that starts the command. */
 function wantsJson(argv: string[]): boolean {
@@ -274,12 +293,17 @@ function exitCodeOf(event: ExitEvent): number {
   return event.exitCode ?? (event.signal ? 128 + event.signal : 1);
 }
 
-function parseFlags(args: string[], valueFlags: string[], boolFlags: string[]): { flags: Map<string, string | true>; rest: string[] } {
+function parseFlags(args: string[], valueFlags: string[], boolFlags: string[], repeatFlags: string[] = []): { flags: Map<string, string | true>; rest: string[]; repeated: Map<string, string[]> } {
   const flags = new Map<string, string | true>();
+  const repeated = new Map<string, string[]>();
   const rest: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] ?? '';
-    if (valueFlags.includes(arg)) {
+    if (repeatFlags.includes(arg)) {
+      const value = args[++i];
+      if (value === undefined) throw new CliError(`${arg} needs a value`);
+      repeated.set(arg, [...(repeated.get(arg) ?? []), value]);
+    } else if (valueFlags.includes(arg)) {
       const value = args[++i];
       if (value === undefined) throw new CliError(`${arg} needs a value`);
       flags.set(arg, value);
@@ -287,7 +311,80 @@ function parseFlags(args: string[], valueFlags: string[], boolFlags: string[]): 
     else if (arg.startsWith('-') && arg !== '-') throw new CliError(`unknown option ${arg}\n\n${USAGE}`);
     else rest.push(arg);
   }
-  return { flags, rest };
+  return { flags, rest, repeated };
+}
+
+const LISTENER_EVENTS = ['attention', 'resolved', 'turn', 'exit'];
+
+/** `http:<url>`, `cmd:<argv0>[,<arg>…]`, `omb:<botId>/<threadId>` plus #events/#header/#bearer-env fragments. */
+function parseListenSpec(spec: string, ackTimeoutSec?: number): ListenerRequest {
+  const [head = '', ...fragments] = spec.split('#');
+  let request: ListenerRequest;
+  if (head.startsWith('omb:')) {
+    const [botId, threadId] = head.slice(4).split('/');
+    if (!botId || !threadId) throw new CliError(`bad omb listener spec (omb:<botId>/<threadId>): ${spec}`);
+    request = { kind: 'openmausbot', openmausbot: { botId, threadId } };
+  } else if (head.startsWith('http:')) {
+    const url = head.slice(5);
+    if (!/^https?:\/\//.test(url)) throw new CliError(`bad http listener spec (http:<url>): ${spec}`);
+    request = { kind: 'http', http: { url } };
+  } else if (head.startsWith('cmd:')) {
+    const argv = head.slice(4).split(',');
+    if (!argv[0]) throw new CliError(`bad command listener spec (cmd:<argv0>[,<arg>…]): ${spec}`);
+    request = { kind: 'command', command: { argv } };
+  } else {
+    throw new CliError(`a listener spec starts with omb:, http: or cmd: — got ${spec}`);
+  }
+  const http = request.http;
+  for (const fragment of fragments) {
+    const at = fragment.indexOf('=');
+    if (at < 0) throw new CliError(`bad listener fragment #${fragment}; expected key=value`);
+    const key = fragment.slice(0, at);
+    const value = fragment.slice(at + 1);
+    if (key === 'events') {
+      const events = value.split(',').filter((name) => name !== '');
+      for (const name of events) if (!LISTENER_EVENTS.includes(name)) throw new CliError(`unknown event name in #events: ${name}`);
+      request.events = events as ListenerRequest['events'];
+    } else if (key === 'header' && http) {
+      const colon = value.indexOf(':');
+      if (colon < 1) throw new CliError('#header needs Name:Value');
+      http.headers = { ...http.headers, [value.slice(0, colon)]: value.slice(colon + 1) };
+    } else if (key === 'bearer-env' && http) {
+      const bearer = process.env[value];
+      if (!bearer) throw new CliError(`#bearer-env=${value} is set but $${value} is empty`);
+      http.bearer = bearer;
+    } else {
+      throw new CliError(`unknown listener fragment: #${key}`);
+    }
+  }
+  if (ackTimeoutSec !== undefined) request.ackTimeoutSec = ackTimeoutSec;
+  return request;
+}
+
+function readListenFile(path: string): ListenerRequest {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as ListenerRequest;
+  } catch (error) {
+    throw new CliError(`cannot read listener file ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function parseAckTimeout(flags: Map<string, string | true>): number | undefined {
+  if (!flags.has('--ack-timeout')) return undefined;
+  const seconds = Number(flags.get('--ack-timeout'));
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 300) throw new CliError('--ack-timeout needs an integer between 1 and 300 seconds');
+  return seconds;
+}
+
+function collectListeners(flags: Map<string, string | true>, repeated: Map<string, string[]>): ListenerRequest[] {
+  const ackTimeoutSec = parseAckTimeout(flags);
+  const listeners = (repeated.get('--listen') ?? []).map((spec) => parseListenSpec(spec, ackTimeoutSec));
+  for (const path of repeated.get('--listen-file') ?? []) {
+    const fromFile = readListenFile(path);
+    listeners.push(ackTimeoutSec === undefined ? fromFile : { ...fromFile, ackTimeoutSec });
+  }
+  if (listeners.length === 0) throw new CliError(`at least one --listen or --listen-file is required\n\n${USAGE}`);
+  return listeners;
 }
 
 function pad(value: string, width: number): string {
@@ -297,12 +394,13 @@ function pad(value: string, width: number): string {
 async function run(api: Api, args: string[]): Promise<number> {
   const separator = args.indexOf('--');
   if (separator < 0 || separator === args.length - 1) throw new CliError(`hub run needs a command after --\n\n${USAGE}`);
-  const { flags } = parseFlags(args.slice(0, separator), ['--cwd', '--title', '--timeout'], ['-q', '--quiet', '--unattended', '--json', '--detach', '--wait']);
+  const { flags, repeated } = parseFlags(args.slice(0, separator), ['--cwd', '--title', '--timeout'], ['-q', '--quiet', '--unattended', '--json', '--detach', '--wait'], ['--listen', '--listen-file']);
   const timeout = parseTimeout(flags);
+  const listeners = collectListeners(flags, repeated);
   const [command = '', ...commandArgs] = args.slice(separator + 1);
   const { id } = await json<{ id: string }>(api, '/sessions', {
     method: 'POST',
-    body: { cwd: resolve(String(flags.get('--cwd') ?? process.cwd())), command, args: commandArgs, title: flags.get('--title'), unattended: flags.has('--unattended') || undefined },
+    body: { cwd: resolve(String(flags.get('--cwd') ?? process.cwd())), command, args: commandArgs, title: flags.get('--title'), unattended: flags.has('--unattended') || undefined, listeners },
   });
   if (!jsonMode) console.log(id);
   if (flags.has('--wait')) return reportWait(id, await wait(api, id, timeout));
@@ -513,6 +611,86 @@ async function main(argv: string[]): Promise<number> {
         console.log(id);
         if (flags.has('--follow') || flags.has('-f')) return exitCodeOf(await follow(api, id, (text) => void process.stdout.write(text)));
       }
+      return 0;
+    }
+    case 'listen': {
+      const { flags, rest, repeated } = parseFlags(args, ['--ack-timeout'], ['--json', '--no-wait'], ['--listen', '--listen-file']);
+      const listeners = collectListeners(flags, repeated);
+      if (listeners.length !== 1) throw new CliError('hub listen takes exactly one listener (one --listen or one --listen-file)');
+      const id = await resolveId(api, rest[0]);
+      const result = await call(api, `/sessions/${id}/listeners`, { method: 'POST', body: { ...(listeners[0] as object), wait: !flags.has('--no-wait') } });
+      const body: unknown = await result.json();
+      if (jsonMode) printJson(body);
+      else console.log(`listener added to ${id}`);
+      return 0;
+    }
+    case 'ack': {
+      const { rest } = parseFlags(args, [], ['--json']);
+      const [handshakeId, ackToken] = rest;
+      if (handshakeId === undefined || ackToken === undefined) throw new CliError(`hub ack needs <handshake-id> <token>\n\n${USAGE}`);
+      const api = loadApi();
+      let response: Response;
+      try {
+        response = await fetch(`${api.baseUrl}/handshakes/${encodeURIComponent(handshakeId)}/ack`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: ackToken }),
+        });
+      } catch {
+        throw notRunning();
+      }
+      const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!response.ok) throw new CliError(`error ${response.status}: ${typeof payload.error === 'string' ? payload.error : response.statusText}`);
+      if (jsonMode) printJson(payload);
+      else console.log(`acknowledged ${handshakeId}`);
+      return 0;
+    }
+    case 'listeners': {
+      const sub = args[0];
+      if (sub === 'rm' || sub === 'resume') {
+        const id = await resolveId(api, args[1]);
+        const listenerId = args[2];
+        if (listenerId === undefined) throw new CliError(`hub listeners ${sub} needs <session> <listener-id>\n\n${USAGE}`);
+        if (sub === 'rm') await call(api, `/sessions/${id}/listeners/${encodeURIComponent(listenerId)}`, { method: 'DELETE' });
+        else printJson(await json<unknown>(api, `/sessions/${id}/listeners/${encodeURIComponent(listenerId)}/resume`, { method: 'POST' }));
+        return 0;
+      }
+      const { rest } = parseFlags(args, [], ['--json']);
+      const id = await resolveId(api, rest[0]);
+      const listeners = await json<unknown[]>(api, `/sessions/${id}/listeners`);
+      if (jsonMode) printJson(listeners);
+      else for (const listener of listeners) console.log(JSON.stringify(listener));
+      return 0;
+    }
+    case 'events': {
+      const { flags, rest } = parseFlags(args, ['--since', '--limit'], ['--json', '--follow', '-f']);
+      const id = await resolveId(api, rest[0]);
+      let since = flags.has('--since') ? Number(flags.get('--since')) : 0;
+      if (!Number.isInteger(since) || since < 0) throw new CliError('--since needs a non-negative integer seq');
+      const limit = flags.has('--limit') ? Number(flags.get('--limit')) : undefined;
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) throw new CliError('--limit needs a positive integer');
+      const followMode = flags.has('--follow') || flags.has('-f');
+      for (;;) {
+        const page = await json<{ events: unknown[]; next: number }>(api, `/sessions/${id}/events?since=${since}${limit === undefined ? '' : `&limit=${limit}`}`);
+        if (!followMode && jsonMode) {
+          printJson(page);
+          return 0;
+        }
+        for (const event of page.events) console.log(JSON.stringify(event));
+        since = page.next;
+        if (!followMode) return 0;
+        await new Promise<void>((resolve) => setTimeout(resolve, 500));
+      }
+    }
+    case 'deliveries': {
+      const { flags, rest } = parseFlags(args, ['--listener', '--limit'], ['--json']);
+      const id = await resolveId(api, rest[0]);
+      const listener = flags.get('--listener');
+      const limit = flags.get('--limit');
+      const query = `${listener === undefined || listener === true ? '' : `?listener=${encodeURIComponent(listener)}`}${limit === undefined || limit === true ? '' : `${listener === undefined || listener === true ? '?' : '&'}limit=${encodeURIComponent(limit)}`}`;
+      const records = await json<unknown[]>(api, `/sessions/${id}/deliveries${query}`);
+      if (jsonMode) printJson(records);
+      else for (const record of records) console.log(JSON.stringify(record));
       return 0;
     }
     default:

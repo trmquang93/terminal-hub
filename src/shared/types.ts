@@ -84,6 +84,8 @@ export interface SessionInfo extends SessionMeta {
   turn: TurnInfo | null;
   /** Not running and either a plain command (restart) or a Claude session with a known id. */
   resumable: boolean;
+  /** Redacted per-session event listeners; absent or empty when the session has none. */
+  listeners?: ListenerInfo[];
 }
 
 export interface StartSessionOptions {
@@ -97,6 +99,122 @@ export interface StartSessionOptions {
   /** Enables the default safe auto-answer policy (approve "Do you want to proceed?" with Enter). */
   unattended?: boolean;
   autoAnswer?: AutoAnswerPolicy;
+  /** Per-session event listeners. Required on the agent surface (POST /sessions, hub run). */
+  listeners?: ListenerRequest[];
+}
+
+export type ListenerKind = 'openmausbot' | 'http' | 'command';
+
+/** The event names a listener can subscribe to. */
+export type EventName = 'attention' | 'resolved' | 'turn' | 'exit';
+
+export type ListenerState = 'pending' | 'active' | 'degraded' | 'disabled';
+
+export interface HttpListenerEndpoint {
+  url: string;
+  /** Sent as `Authorization: Bearer …`; never returned by a read command. */
+  bearer?: string;
+  headers?: Record<string, string>;
+}
+
+export interface CommandListenerEndpoint {
+  argv: string[];
+  /** Defaults to the session cwd. */
+  cwd?: string;
+  /** Defaults to 5000, capped at 60000. */
+  timeoutMs?: number;
+}
+
+export interface OpenmausbotListenerEndpoint {
+  botId: string;
+  threadId: string;
+}
+
+/** A listener as the caller writes it. */
+export interface ListenerRequest {
+  kind: ListenerKind;
+  /** Defaults to all four names when absent or empty. */
+  events?: EventName[];
+  /** Per-listener ack deadline, 1..300 s. */
+  ackTimeoutSec?: number;
+  http?: HttpListenerEndpoint;
+  command?: CommandListenerEndpoint;
+  openmausbot?: OpenmausbotListenerEndpoint;
+}
+
+/** A listener as a read command returns it: redacted, with delivery counters. */
+export interface ListenerInfo {
+  id: string;
+  kind: ListenerKind;
+  events: EventName[];
+  state: ListenerState;
+  createdAt: string;
+  acknowledgedAt: string | null;
+  ackTimeoutSec?: number;
+  /** http: host only. */
+  host?: string;
+  /** command: basename of argv[0]. */
+  command?: string;
+  argvLength?: number;
+  /** openmausbot: opaque ids. */
+  botId?: string;
+  threadId?: string;
+  pending?: number;
+  failed?: number;
+  lastError?: string | null;
+  lastDeliveryAt?: string | null;
+}
+
+export type HandshakeState = 'pending' | 'acked' | 'created' | 'expired' | 'failed' | 'cancelled';
+
+export interface HandshakeInfo {
+  id: string;
+  state: HandshakeState;
+  expiresAt: string;
+  sessionId: string | null;
+}
+
+/** The envelope one event has on every transport. */
+export interface HubEvent {
+  eventId: string;
+  seq: number;
+  event: EventName;
+  at: string;
+  session: {
+    id: string;
+    title: string;
+    cwd: string;
+    command: string;
+    state: string;
+    exitCode: number | null;
+  };
+  attention?: {
+    reason: AttentionInfo['reason'];
+    promptText: string;
+    source: AttentionInfo['source'];
+    since: string;
+  };
+  turn?: TurnInfo;
+  exit?: {
+    exitCode: number | null;
+    signal: number | null;
+    cause: string | null;
+  };
+}
+
+export type DeliveryOutcome = 'delivered' | 'http_error' | 'timeout' | 'spawn_error' | 'nonzero_exit' | 'bridge_error';
+
+export interface DeliveryRecord {
+  deliveryId: string;
+  listenerId: string;
+  eventId: string;
+  seq: number;
+  attempt: number;
+  startedAt: string;
+  durationMs: number;
+  outcome: DeliveryOutcome;
+  status: number | null;
+  error: string | null;
 }
 
 export interface OutputSlice {
