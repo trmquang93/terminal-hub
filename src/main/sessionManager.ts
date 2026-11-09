@@ -13,15 +13,20 @@ import { discoverOpencodeSessionId, opencodeSessionExists, planOpencodeLaunch } 
 import { OscTitleParser } from './oscTitle';
 import type { OutputChunk, SessionService } from './service';
 import type { SessionStore } from './sessionStore';
-import { nativeTranscript, renderTranscript } from './transcript';
+import { nativeTranscript, renderTranscript, transcriptHasAssistantText } from './transcript';
 
 const STOP_GRACE_MS = 3000;
 const ANSWER_CHUNK_GAP_MS = 150;
 const DISCOVERY_INTERVAL_MS = 2000;
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 32;
-/** Most recent output kept in memory per running agent session, so a re-opened view can repaint. Never written to disk. */
+/** Most recent output kept in memory per running agent session, so a re-opened view can repaint. The last screen is also written to tail.log on exit. */
 const LIVE_TAIL_BYTES = 2 * 1024 * 1024;
+/** How much of the last screen is kept in tail.log when an agent session exits. */
+const TAIL_LOG_BYTES = 200 * 1024;
+
+/** macOS/Linux signal numbers node-pty reports inside exitCode (128+n) when it gives no separate signal. */
+const SIGNAL_NAMES: Record<number, string> = { 1: 'SIGHUP', 2: 'SIGINT', 3: 'SIGQUIT', 9: 'SIGKILL', 15: 'SIGTERM', 18: 'SIGCONT', 19: 'SIGSTOP' };
 
 type Signal = 'SIGHUP' | 'SIGTERM' | 'SIGKILL';
 
@@ -184,7 +189,13 @@ export class SessionManager implements SessionService {
    */
   private async agentHistory(meta: SessionMeta, claude: AgentInfo): Promise<{ data: Buffer; legacy: boolean }> {
     const native = nativeTranscript(claude, meta.cwd);
-    if (native !== null) return { data: Buffer.from(native), legacy: false };
+    const tail = this.store.readTail(meta.id);
+    if (native !== null) {
+      // A run killed before its first reply leaves a transcript with the prompt only; the last screen then says what it did.
+      if (tail !== null && !transcriptHasAssistantText(claude, meta.cwd)) return { data: Buffer.from(`${native}\n── last screen ──\n${tail}`), legacy: false };
+      return { data: Buffer.from(native), legacy: false };
+    }
+    if (tail !== null) return { data: Buffer.from(tail), legacy: false };
     const total = this.store.size(meta.id);
     if (total > 0) return { data: await this.store.readOutput(meta.id, 0, total), legacy: true };
     return { data: Buffer.from(renderTranscript(claude, meta.cwd)), legacy: false };
@@ -267,6 +278,7 @@ export class SessionManager implements SessionService {
       endedAt: null,
       exitCode: null,
       signal: null,
+      exitCause: null,
       cols: clampDimension(options.cols, DEFAULT_COLS),
       rows: clampDimension(options.rows, DEFAULT_ROWS),
       bytesWritten: 0,
@@ -424,6 +436,7 @@ export class SessionManager implements SessionService {
 
   private handleExit(meta: SessionMeta, child: pty.IPty, exitCode: number, signal: number | null): void {
     if (this.live.get(meta.id) !== child) return;
+    const stoppedByHub = this.killTimers.has(meta.id);
     this.live.delete(meta.id);
     clearTimeout(this.killTimers.get(meta.id));
     this.killTimers.delete(meta.id);
@@ -433,18 +446,42 @@ export class SessionManager implements SessionService {
     this.trackers.delete(meta.id);
     this.turns.delete(meta.id);
     this.titleParsers.delete(meta.id);
+    this.persistTail(meta);
     this.dropLiveTail(meta.id);
     this.store.close(meta.id);
+    const endedSignal = signal && signal > 0 ? signal : exitCode > 128 && exitCode <= 192 ? exitCode - 128 : null;
+    const exitCause = this.shuttingDown
+      ? 'app-quit'
+      : endedSignal === null
+        ? `exit code ${exitCode}`
+        : stoppedByHub
+          ? `stopped by hub (${SIGNAL_NAMES[endedSignal] ?? `signal ${endedSignal}`})`
+          : `${SIGNAL_NAMES[endedSignal] ?? `signal ${endedSignal}`} (sent from outside the app)`;
     Object.assign(meta, {
       state: this.shuttingDown ? 'interrupted' : 'exited',
       endedAt: new Date().toISOString(),
       exitCode,
-      signal: signal || null,
+      signal: endedSignal,
+      exitCause,
       bytesWritten: this.store.size(meta.id),
     });
+    this.options.log?.(`session ${meta.id.slice(0, 8)} exited: ${exitCause} (code ${exitCode})`);
     this.discover(meta, false);
     this.store.writeMeta(meta);
     this.emitChanged(meta);
+  }
+
+  /**
+   * Writes the last screen of an agent session to tail.log before the in-memory tail is dropped: `hub text` can then show
+   * what the program printed even when it was killed before writing any assistant output, or when the app itself quits.
+   */
+  private persistTail(meta: SessionMeta): void {
+    if (!meta.claude) return;
+    const out = this.liveOutputs.get(meta.id);
+    if (!out || out.chunks.length === 0) return;
+    const text = stripAnsi(Buffer.concat(out.chunks).toString('utf8')).replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    const kept = text.length > TAIL_LOG_BYTES ? text.slice(-TAIL_LOG_BYTES).replace(/^[^\n]*\n/, '') : text;
+    this.store.writeTail(meta.id, kept);
   }
 
   /** Records the Claude session id from the newest transcript when none is known. Never overwrites. */

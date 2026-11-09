@@ -79,7 +79,7 @@ afterEach(async () => {
 });
 
 describe('agent sessions keep no raw PTY log', () => {
-  it('a Claude session creates no output.log, still streams live output, writes no input.log, and keeps bytesWritten 0', async () => {
+  it('a Claude session writes no output.log and no input.log, streams live output, and keeps only its last screen in tail.log on exit', async () => {
     const m = manager();
     const id = claude(m, { FAKE_WAIT: '1' });
     await until(() => seen(id).includes('LIVE-OUTPUT'), 'live output event');
@@ -87,7 +87,8 @@ describe('agent sessions keep no raw PTY log', () => {
     m.write(id, 'hello\n');
     await exited(m, id);
     expect(seen(id)).toContain('got=hello');
-    expect(files(id)).toEqual(['meta.json']);
+    expect(files(id)).toEqual(['meta.json', 'tail.log']);
+    expect(readFileSync(join(base, 'sessions', id, 'tail.log'), 'utf8')).toContain('got=hello');
     expect(readMeta(id).bytesWritten).toBe(0);
     expect(m.get(id)?.bytesWritten).toBe(0);
   });
@@ -98,7 +99,8 @@ describe('agent sessions keep no raw PTY log', () => {
     expect(agent?.provider).toBe('opencode');
     await exited(m, id);
     expect(seen(id)).toContain('OPENCODE-SCREEN');
-    expect(files(id)).toEqual(['meta.json']);
+    expect(files(id)).toEqual(['meta.json', 'tail.log']);
+    expect(readFileSync(join(base, 'sessions', id, 'tail.log'), 'utf8')).toContain('OPENCODE-SCREEN');
   });
 
   it('a shell session still appends to output.log and counts bytesWritten', async () => {
@@ -178,10 +180,12 @@ describe('the terminal view of an agent session', () => {
     expect(m.size(id)).toBeGreaterThan(firstRun);
   });
 
-  it('says so when there is no transcript to show', async () => {
+  it('shows the last screen when the agent wrote no transcript, and the one-line note once that screen is gone', async () => {
     const m = manager();
     const { id } = m.start({ cwd: work, command: 'opencode' });
     await exited(m, id);
+    expect(Buffer.from((await m.readTail(id, 1 << 20)).data).toString()).toContain('OPENCODE-SCREEN');
+    rmSync(join(base, 'sessions', id, 'tail.log'), { force: true });
     expect(Buffer.from((await m.readTail(id, 1 << 20)).data).toString()).toMatch(/^\(no transcript yet/);
   });
 });
@@ -217,6 +221,7 @@ describe('an agent session from before native transcripts', () => {
     const id = claude(m);
     await exited(m, id);
     dropTranscript(id);
+    rmSync(join(base, 'sessions', id, 'tail.log'), { force: true });
     writeFileSync(join(base, 'sessions', id, 'output.log'), OLD_LOG);
 
     const tail = await m.readTail(id, 1 << 20);
@@ -234,6 +239,7 @@ describe('an agent session from before native transcripts', () => {
     const id = claude(m);
     await exited(m, id);
     dropTranscript(id);
+    rmSync(join(base, 'sessions', id, 'tail.log'), { force: true });
 
     expect(Buffer.from((await m.readTail(id, 1 << 20)).data).toString()).toMatch(/^\(no transcript yet/);
     expect((await get(`/sessions/${id}/text`)).body).toMatch(/^\(no transcript yet/);

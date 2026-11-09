@@ -496,6 +496,61 @@ describe('SessionManager — terminal title escapes', () => {
   });
 });
 
+describe('SessionManager — why a session ended and its last screen', () => {
+  // A stand-in claude that, like a killed run, writes the prompt to its transcript and then dies before any reply.
+  const PROMPT_ONLY_CLAUDE = `#!/bin/sh
+sid=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--session-id" ] || [ "$prev" = "--resume" ]; then sid="$a"; fi
+  prev="$a"
+done
+proj="$CLAUDE_CONFIG_DIR/projects/$(pwd -P | sed 's/[^A-Za-z0-9]/-/g')"
+mkdir -p "$proj"
+printf '%s\\n' '{"type":"user","isSidechain":false,"message":{"role":"user","content":"launch the repro"}}' > "$proj/$sid.jsonl"
+printf 'last screen: GPU process exited unexpectedly\\n'
+exit 143
+`;
+
+  it('records a derived signal and cause for exit code 143, and serves the last screen next to a prompt-only transcript', async () => {
+    writeFileSync(join(bin, 'claude'), PROMPT_ONLY_CLAUDE);
+    chmodSync(join(bin, 'claude'), 0o755);
+    const m = manager();
+    const { id } = m.start({ cwd: work, command: 'claude', env: { CLAUDE_CONFIG_DIR: config } });
+    const done = await exited(m, id);
+    expect(done).toMatchObject({ state: 'exited', exitCode: 143, signal: 15, exitCause: 'SIGTERM (sent from outside the app)' });
+    expect(readMeta(id).exitCause).toBe('SIGTERM (sent from outside the app)');
+
+    const history = (await m.readHistory(id, 0, Infinity, true)).data.toString();
+    expect(history).toContain('launch the repro');
+    expect(history).toContain('── last screen ──');
+    expect(history).toContain('GPU process exited unexpectedly');
+    expect(existsSync(join(base, 'sessions', id, 'tail.log'))).toBe(true);
+  });
+
+  it('keeps the last screen of an agent session that hub stopped, and says so', async () => {
+    const m = manager();
+    const { id } = m.start({ cwd: work, command: 'claude', env: { CLAUDE_CONFIG_DIR: config, FAKE_SLEEP: '30' } });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    m.stop(id);
+    const done = await exited(m, id);
+    expect(done).toMatchObject({ state: 'exited', signal: 15, exitCause: 'stopped by hub (SIGTERM)' });
+    expect((await m.readHistory(id, 0, Infinity, true)).data.toString()).toContain('ARGS=');
+  });
+
+  it('says app-quit when the app shuts down, and the removed session takes its tail.log with it', async () => {
+    const m = manager();
+    const { id } = m.start({ cwd: work, command: 'claude', env: { CLAUDE_CONFIG_DIR: config, FAKE_SLEEP: '30' } });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await m.shutdown();
+    const done = m.get(id);
+    expect(done).toMatchObject({ state: 'interrupted', exitCause: 'app-quit' });
+    expect(existsSync(join(base, 'sessions', id, 'tail.log'))).toBe(true);
+    await m.remove(id);
+    expect(existsSync(join(base, 'sessions', id))).toBe(false);
+  });
+});
+
 describe('SessionManager — human-created sessions', () => {
   it('creates a session with no listener immediately and reports listeners: []', async () => {
     const m = manager();

@@ -51,6 +51,32 @@ export class SessionStore {
     return join(this.dir(id), 'output.log');
   }
 
+  /** An agent session's last screen, written when its pty exits; plain text, no escape codes. */
+  private tailPath(id: string): string {
+    return join(this.dir(id), 'tail.log');
+  }
+
+  /** Replaces the agent session's last-screen file. An empty text removes it, so a stale screen is never served. */
+  writeTail(id: string, text: string): void {
+    const path = this.tailPath(id);
+    if (text.trim() === '') {
+      rmSync(path, { force: true });
+      return;
+    }
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, `${text.replace(/\s+$/, '')}\n`);
+    renameSync(tmp, path);
+  }
+
+  /** The agent session's last screen as plain text, or null when none was kept. */
+  readTail(id: string): string | null {
+    try {
+      return readFileSync(this.tailPath(id), 'utf8');
+    } catch {
+      return null;
+    }
+  }
+
   create(meta: SessionMeta): void {
     mkdirSync(this.dir(meta.id), { recursive: true });
     if (meta.claude === null) appendFileSync(this.outputPath(meta.id), '');
@@ -105,6 +131,7 @@ export class SessionStore {
       endedAt: raw.endedAt ?? (wasRunning ? this.lastWrite(id, startedAt) : null),
       exitCode: raw.exitCode ?? null,
       signal: raw.signal ?? null,
+      exitCause: raw.exitCause ?? null,
       cols: raw.cols ?? 80,
       rows: raw.rows ?? 24,
       bytesWritten: logSize,
