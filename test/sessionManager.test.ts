@@ -12,6 +12,8 @@ let bin: string;
 let work: string;
 let config: string;
 let managers: SessionManager[];
+// Agent sessions keep no output.log, so output is collected from the live events of every session.
+let seen: Map<string, string>;
 
 // A stand-in `claude` that reports how it was launched and, like the real one, writes a transcript.
 const FAKE_CLAUDE = `#!/bin/sh
@@ -30,10 +32,14 @@ mkdir -p "$proj" && echo '{}' >> "$proj/$sid.jsonl"
 sleep "\${FAKE_SLEEP:-0}"
 `;
 
+function track(m: SessionManager): SessionManager {
+  m.onOutput(({ id, data }) => seen.set(id, (seen.get(id) ?? '') + data.toString()));
+  managers.push(m);
+  return m;
+}
+
 function manager(): SessionManager {
-  const created = new SessionManager(new SessionStore(join(base, 'sessions')), 'test', { baseEnv: () => ({ PATH: `${bin}:/usr/bin:/bin` }) });
-  managers.push(created);
-  return created;
+  return track(new SessionManager(new SessionStore(join(base, 'sessions')), 'test', { baseEnv: () => ({ PATH: `${bin}:/usr/bin:/bin` }) }));
 }
 
 function exited(m: SessionManager, id: string): Promise<SessionInfo> {
@@ -48,7 +54,7 @@ function exited(m: SessionManager, id: string): Promise<SessionInfo> {
 }
 
 const readMeta = (id: string): SessionMeta => JSON.parse(readFileSync(join(base, 'sessions', id, 'meta.json'), 'utf8')) as SessionMeta;
-const text = (m: SessionManager, id: string): Promise<string> => m.readOutput(id, 0, Infinity).then((b) => b.toString());
+const text = (_m: SessionManager, id: string): Promise<string> => Promise.resolve(seen.get(id) ?? '');
 
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), 'thub-mgr-')));
@@ -60,6 +66,7 @@ beforeEach(() => {
   writeFileSync(join(bin, 'claude'), FAKE_CLAUDE);
   chmodSync(join(bin, 'claude'), 0o755);
   managers = [];
+  seen = new Map();
 });
 afterEach(async () => {
   for (const m of managers) await m.shutdown();
@@ -267,24 +274,23 @@ describe('SessionManager — attention and answers', () => {
   it('launches Claude with --settings <hub hooks file> unless the user passed one, refreshing the file per launch', async () => {
     const calls: string[] = [];
     const hooksFile = join(base, 'claude-hooks.json');
-    const m = new SessionManager(new SessionStore(join(base, 'sessions')), 'test', { baseEnv: () => ({ PATH: `${bin}:/usr/bin:/bin` }), hooksFile: () => (calls.push('refresh'), hooksFile) });
-    managers.push(m);
+    const m = track(new SessionManager(new SessionStore(join(base, 'sessions')), 'test', { baseEnv: () => ({ PATH: `${bin}:/usr/bin:/bin` }), hooksFile: () => (calls.push('refresh'), hooksFile) }));
     const env = { CLAUDE_CONFIG_DIR: config };
     const mine = m.start({ cwd: work, command: 'claude', args: ['--settings', '/mine.json'], env });
     const hub = m.start({ cwd: work, command: 'claude', env });
     expect(calls).toHaveLength(2);
     expect(hub.claude?.resumeCommand).toContain(`--settings ${hooksFile}`);
     expect(mine.claude?.resumeCommand).not.toContain(hooksFile);
-    const output = async (id: string): Promise<string> => {
+    const outputOf = async (id: string): Promise<string> => {
       for (let i = 0; i < 50; i++) {
-        const text = (await m.readOutput(id, 0, 4096)).toString();
-        if (text.includes('ARGS=')) return text;
+        const output = await text(m, id);
+        if (output.includes('ARGS=')) return output;
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
       return '';
     };
-    expect(await output(hub.id)).toContain(`--settings ${hooksFile}`);
-    expect(await output(mine.id)).not.toContain(hooksFile);
+    expect(await outputOf(hub.id)).toContain(`--settings ${hooksFile}`);
+    expect(await outputOf(mine.id)).not.toContain(hooksFile);
   });
 
   it('never writes to the Claude config dir when a Claude session starts', () => {

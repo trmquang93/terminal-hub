@@ -8,7 +8,7 @@ import { keepLastFrame } from './replay';
 
 const REPLAY_BYTES = 8 * 1024 * 1024;
 
-/** Shows one session: replays the tail of output.log, then follows live output. Remount per session id. */
+/** Shows one session: replays the tail of output.log (shell), the in-memory tail (running agent) or the native transcript (finished agent), then follows live output. Remount per session id. */
 export function TerminalView({ id, ended }: { id: string; ended: boolean }) {
   const host = useRef<HTMLDivElement>(null);
 
@@ -45,7 +45,7 @@ export function TerminalView({ id, ended }: { id: string; ended: boolean }) {
       else pending.push(event);
     });
     void window.hub.readOutput(id, REPLAY_BYTES).then((slice) => {
-      if (slice.start > 0) {
+      if (slice.source === 'log' && slice.start > 0) {
         term.write(`\x1b[2m… showing the last ${formatBytes(slice.total - slice.start)} of ${formatBytes(slice.total)}; the full log is on disk …\x1b[0m\r\n`);
       }
       term.write(ended ? keepLastFrame(slice.data) : slice.data);

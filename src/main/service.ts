@@ -2,7 +2,7 @@ import type { AnswerRequest, SessionInfo, StartSessionOptions } from '../shared/
 
 export interface OutputChunk {
   id: string;
-  /** Byte offset in output.log just after this chunk. */
+  /** Byte offset just after this chunk: in output.log for a shell, in the live output for an agent session (nothing is on disk). */
   endOffset: number;
   data: Buffer;
 }
@@ -22,9 +22,12 @@ export interface SessionService {
   setArchived(id: string, archived: boolean): SessionInfo;
   setTitle(id: string, title: string): SessionInfo;
   releaseTitle(id: string): SessionInfo;
+  /** The offset live output runs to (output.log size for a shell). */
   size(id: string): number;
+  /** output.log bytes; empty for an agent session. */
   readChunks(id: string, start: number, end: number): AsyncGenerator<Buffer>;
-  readOutput(id: string, offset: number, limit: number): Promise<Buffer>;
+  /** output.log for a shell, the rendered native transcript (plain text) for an agent session. */
+  readHistory(id: string, offset: number, limit: number): Promise<{ data: Buffer; total: number }>;
   onOutput(listener: (chunk: OutputChunk) => void): () => void;
   onAttention(listener: (session: SessionInfo) => void): () => void;
   onTurn(listener: (session: SessionInfo) => void): () => void;

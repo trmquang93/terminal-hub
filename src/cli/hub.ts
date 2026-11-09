@@ -13,7 +13,7 @@ const startHint = typeof HUB_PACKAGED !== 'undefined' && HUB_PACKAGED ? "open -a
 const USAGE = `usage:
   hub run [--cwd DIR] [--title T] [--unattended] [-q] -- CMD ARGS…   start a session, follow it, exit with its exit code
   hub ls                                              list sessions (state, resumable, archived)
-  hub text <id> [--follow]                            plain-text output (ANSI stripped)
+  hub text <id> [--follow]                            plain text: the agent's transcript (Claude Code, opencode) or the ANSI-stripped log (shell)
   hub send <id> "text" [--no-enter]                   type into a session (Enter appended by default)
   hub stop <id>                                       SIGTERM, SIGKILL after 3 s
   hub resume <id> [--follow]                          resume (Claude Code) or restart (other commands)

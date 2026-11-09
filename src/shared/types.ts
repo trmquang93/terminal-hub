@@ -103,6 +103,8 @@ export interface OutputSlice {
   data: Uint8Array;
   start: number;
   total: number;
+  /** `log`: tail of output.log (shell); `live`: in-memory tail of a running agent; `transcript`: a finished agent's native transcript as plain text. */
+  source: 'log' | 'live' | 'transcript';
 }
 
 export interface OutputEvent {

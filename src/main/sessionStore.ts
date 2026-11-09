@@ -20,6 +20,7 @@ export function isSessionId(id: string): boolean {
 
 /**
  * On-disk session storage: `<root>/<id>/{meta.json,output.log,input.log}`.
+ * output.log exists for shell sessions only: Claude Code and opencode keep their own transcript (see transcript.ts).
  * Nothing here ever prunes; only delete()/deleteAll() remove data.
  */
 export class SessionStore {
@@ -40,7 +41,7 @@ export class SessionStore {
 
   create(meta: SessionMeta): void {
     mkdirSync(this.dir(meta.id), { recursive: true });
-    appendFileSync(this.outputPath(meta.id), '');
+    if (meta.claude === null) appendFileSync(this.outputPath(meta.id), '');
     this.writeMeta(meta);
   }
 
@@ -102,11 +103,15 @@ export class SessionStore {
   }
 
   private lastWrite(id: string, fallback: string): string {
-    try {
-      return statSync(this.outputPath(id)).mtime.toISOString();
-    } catch {
-      return fallback;
+    // An agent session has no output.log; meta.json is rewritten on every title and id change.
+    for (const path of [this.outputPath(id), join(this.dir(id), 'meta.json')]) {
+      try {
+        return statSync(path).mtime.toISOString();
+      } catch {
+        // try the next file
+      }
     }
+    return fallback;
   }
 
   private writer(id: string): Writer {

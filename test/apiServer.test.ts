@@ -75,7 +75,7 @@ const service: SessionService = {
     await Promise.resolve();
     yield LOG.subarray(start, end);
   },
-  readOutput: (_id, offset, limit) => Promise.resolve(LOG.subarray(offset, offset + limit)),
+  readHistory: (_id, offset, limit) => Promise.resolve({ data: LOG.subarray(offset, offset + limit), total: LOG.length }),
   onOutput: (listener) => {
     outputListeners.add(listener);
     return () => outputListeners.delete(listener);

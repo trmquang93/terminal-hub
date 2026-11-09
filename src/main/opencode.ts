@@ -10,6 +10,7 @@ const SESSION_FLAGS = new Set(['--session', '-s']);
 const CONTINUE_FLAGS = new Set(['--continue', '-c']);
 const SQLITE_TIMEOUT_MS = 3000;
 const CANDIDATE_LIMIT = 10;
+const SQLITE_MAX_BUFFER = 256 * 1024 * 1024;
 
 export function isOpencodeSessionId(value: string): boolean {
   return SESSION_ID_RE.test(value);
@@ -76,18 +77,18 @@ export function planOpencodeLaunch(
   };
 }
 
-function query(dataDir: string, sql: string): Record<string, unknown>[] | null {
+export function query(dataDir: string, sql: string): Record<string, unknown>[] | null {
   const db = join(dataDir, 'opencode.db');
   if (!existsSync(db)) return null;
   try {
-    const out = execFileSync('sqlite3', ['-readonly', '-json', db], { input: sql, encoding: 'utf8', timeout: SQLITE_TIMEOUT_MS, stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+    const out = execFileSync('sqlite3', ['-readonly', '-json', db], { input: sql, encoding: 'utf8', timeout: SQLITE_TIMEOUT_MS, maxBuffer: SQLITE_MAX_BUFFER, stdio: ['pipe', 'pipe', 'ignore'] }).trim();
     return out === '' ? [] : (JSON.parse(out) as Record<string, unknown>[]);
   } catch {
     return null;
   }
 }
 
-function quote(value: string): string {
+export function quote(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 

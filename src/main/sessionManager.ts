@@ -12,12 +12,15 @@ import { discoverOpencodeSessionId, opencodeSessionExists, planOpencodeLaunch } 
 import { OscTitleParser } from './oscTitle';
 import type { OutputChunk, SessionService } from './service';
 import type { SessionStore } from './sessionStore';
+import { renderTranscript } from './transcript';
 
 const STOP_GRACE_MS = 3000;
 const ANSWER_CHUNK_GAP_MS = 150;
 const DISCOVERY_INTERVAL_MS = 2000;
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 32;
+/** Most recent output kept in memory per running agent session, so a re-opened view can repaint. Never written to disk. */
+const LIVE_TAIL_BYTES = 2 * 1024 * 1024;
 
 type Signal = 'SIGHUP' | 'SIGTERM' | 'SIGKILL';
 
@@ -58,8 +61,17 @@ function findExecutable(command: string, searchPath: string | undefined, cwd: st
   throw new HubError(400, `command not found in PATH: ${command}`);
 }
 
+async function* noChunks(): AsyncGenerator<Buffer> {}
+
 function clampDimension(value: number | undefined, fallback: number): number {
   return Number.isInteger(value) && (value as number) > 0 && (value as number) <= 1000 ? (value as number) : fallback;
+}
+
+/** In-memory output of an agent session: `total` counts every byte since the app started, `chunks` hold the newest ones. */
+interface LiveOutput {
+  total: number;
+  chunks: Buffer[];
+  held: number;
 }
 
 export interface ManagerOptions {
@@ -88,6 +100,7 @@ export class SessionManager implements SessionService {
   private readonly trackers = new Map<string, AttentionTracker>();
   private readonly turns = new Map<string, TurnTracker>();
   private readonly titleParsers = new Map<string, OscTitleParser>();
+  private readonly liveOutputs = new Map<string, LiveOutput>();
   private readonly baseEnv: () => NodeJS.ProcessEnv;
   private shuttingDown = false;
 
@@ -127,27 +140,47 @@ export class SessionManager implements SessionService {
     return meta;
   }
 
+  /** The offset live output runs to: bytes of output.log for a shell; for an agent session (nothing on disk) the bytes seen since the app started. */
   size(id: string): number {
-    this.require(id);
-    return this.store.size(id);
+    const meta = this.require(id);
+    return meta.claude ? (this.liveOutputs.get(id)?.total ?? 0) : this.store.size(id);
   }
 
+  /** output.log bytes; an agent session has none, so it yields nothing. */
   readChunks(id: string, start: number, end: number): AsyncGenerator<Buffer> {
-    this.require(id);
-    return this.store.readChunks(id, start, end);
+    const meta = this.require(id);
+    return meta.claude ? noChunks() : this.store.readChunks(id, start, end);
   }
 
-  readOutput(id: string, offset: number, limit: number): Promise<Buffer> {
-    this.require(id);
-    return this.store.readOutput(id, offset, limit);
+  /** The session's history from `offset`: output.log for a shell, the rendered native transcript (plain text) for Claude Code and opencode. `total` is the size of that whole history. */
+  async readHistory(id: string, offset: number, limit: number): Promise<{ data: Buffer; total: number }> {
+    const meta = this.require(id);
+    if (!meta.claude) return { data: await this.store.readOutput(id, offset, limit), total: this.store.size(id) };
+    const all = Buffer.from(renderTranscript(meta.claude, meta.cwd));
+    const start = Math.min(Math.max(offset, 0), all.length);
+    return { data: all.subarray(start, start + limit), total: all.length };
   }
 
-  /** The last `tailBytes` of output.log, for rendering. The file keeps everything. */
+  /**
+   * What the terminal view shows first. A shell: the last `tailBytes` of output.log (the file keeps everything).
+   * A running agent: its in-memory tail. A finished agent: its native transcript, which sits outside the live
+   * offsets (`total` 0), so output from a later resume still applies in full.
+   */
   async readTail(id: string, tailBytes: number): Promise<OutputSlice> {
-    const total = this.size(id);
-    const start = Math.max(0, total - tailBytes);
-    const data = await this.store.readOutput(id, start, total - start);
-    return { data, start, total };
+    const meta = this.require(id);
+    if (!meta.claude) {
+      const total = this.store.size(id);
+      const start = Math.max(0, total - tailBytes);
+      return { data: await this.store.readOutput(id, start, total - start), start, total, source: 'log' };
+    }
+    if (!this.live.has(id)) {
+      const text = renderTranscript(meta.claude, meta.cwd);
+      return { data: Buffer.from(text.replaceAll('\n', '\r\n')), start: 0, total: 0, source: 'transcript' };
+    }
+    const out = this.liveOutputs.get(id);
+    const data = Buffer.concat(out?.chunks ?? []);
+    const kept = data.subarray(Math.max(0, data.length - tailBytes));
+    return { data: kept, start: (out?.total ?? 0) - kept.length, total: out?.total ?? 0, source: 'live' };
   }
 
   onOutput(listener: (chunk: OutputChunk) => void): () => void {
@@ -276,6 +309,7 @@ export class SessionManager implements SessionService {
       throw new HubError(400, `failed to start ${meta.command}: ${error instanceof Error ? error.message : String(error)}`);
     }
     this.live.set(meta.id, child);
+    this.dropLiveTail(meta.id);
     this.turns.set(meta.id, new TurnTracker(() => this.live.has(meta.id) && this.emitTurn(meta)));
     this.titleParsers.set(meta.id, new OscTitleParser());
     this.trackers.set(
@@ -295,12 +329,29 @@ export class SessionManager implements SessionService {
   }
 
   private appendOutput(meta: SessionMeta, data: Buffer): void {
-    const endOffset = this.store.appendOutput(meta.id, data);
-    meta.bytesWritten = endOffset;
+    // Claude Code and opencode keep their own transcript; their repainting TUI output is never logged.
+    const endOffset = meta.claude ? this.remember(meta.id, data) : this.store.appendOutput(meta.id, data);
+    if (!meta.claude) meta.bytesWritten = endOffset;
     this.emitter.emit('output', { id: meta.id, endOffset, data });
     this.trackers.get(meta.id)?.output(data);
     const title = this.titleParsers.get(meta.id)?.push(data).at(-1);
     if (title !== undefined) this.applyEscapeTitle(meta, title);
+  }
+
+  private remember(id: string, data: Buffer): number {
+    const out = this.liveOutputs.get(id) ?? { total: 0, chunks: [], held: 0 };
+    this.liveOutputs.set(id, out);
+    out.total += data.length;
+    out.chunks.push(data);
+    out.held += data.length;
+    while (out.held > LIVE_TAIL_BYTES && out.chunks.length > 1) out.held -= out.chunks.shift()?.length ?? 0;
+    return out.total;
+  }
+
+  /** Frees the in-memory tail but keeps the running total, so offsets stay increasing across a resume. */
+  private dropLiveTail(id: string): void {
+    const out = this.liveOutputs.get(id);
+    if (out) Object.assign(out, { chunks: [], held: 0 });
   }
 
   /** The program set its terminal title (OSC 0/2), like a tab title in iTerm2. A manual rename wins. */
@@ -351,6 +402,7 @@ export class SessionManager implements SessionService {
     this.trackers.delete(meta.id);
     this.turns.delete(meta.id);
     this.titleParsers.delete(meta.id);
+    this.dropLiveTail(meta.id);
     this.store.close(meta.id);
     Object.assign(meta, {
       state: this.shuttingDown ? 'interrupted' : 'exited',
@@ -523,6 +575,7 @@ export class SessionManager implements SessionService {
     }
     this.store.delete(id);
     this.sessions.delete(id);
+    this.liveOutputs.delete(id);
     this.emitter.emit('removed', id);
   }
 

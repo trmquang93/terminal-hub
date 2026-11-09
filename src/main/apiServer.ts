@@ -242,14 +242,19 @@ export function createApiServer(options: ApiOptions): Server {
       }
     } else if (method === 'GET') {
       if (action === 'output') {
-        const total = service.size(id);
-        const offset = Math.min(numberParam(url, 'offset', 0), total);
-        const data = await service.readOutput(id, offset, numberParam(url, 'limit', total));
+        const { data, total } = await service.readHistory(id, numberParam(url, 'offset', 0), numberParam(url, 'limit', Infinity));
         res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': data.length, 'X-Total-Bytes': total });
         res.end(data);
         return;
       }
       if (action === 'text') {
+        if (session.claude) {
+          // The agent's transcript is already plain text.
+          const { data, total } = await service.readHistory(id, numberParam(url, 'offset', 0), Infinity);
+          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': data.length, 'X-Total-Bytes': total });
+          res.end(data);
+          return;
+        }
         const total = service.size(id);
         const stripper = new AnsiStripper();
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'X-Total-Bytes': total });

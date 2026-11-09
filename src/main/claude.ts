@@ -168,7 +168,7 @@ export function encodeCwd(cwd: string): string {
   return cwd.replaceAll(/[^A-Za-z0-9]/g, '-');
 }
 
-function projectDirs(configDir: string, cwd: string): string[] {
+export function projectDirs(configDir: string, cwd: string): string[] {
   const candidates = [cwd];
   try {
     candidates.push(realpathSync(cwd));

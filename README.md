@@ -1,7 +1,8 @@
 # Terminal Hub
 
 macOS desktop app (Electron + TypeScript + React + node-pty + xterm.js) that hosts real terminals.
-Every session is written to disk and stays in the list until you delete it by hand.
+Every session is recorded on disk and stays in the list until you delete it by hand. Shell sessions keep their raw output;
+Claude Code and OpenCode sessions keep none and show the agent's own transcript instead.
 
 ```
 npm install      # also fetches the Electron binary
@@ -61,7 +62,11 @@ the app while a session is live: a running session blocks every step, and the ch
 
 `~/Library/Application Support/TerminalHub/` (override with `TERMINAL_HUB_DATA_DIR`)
 
-- `sessions/<uuid>/meta.json`, `output.log` (raw PTY bytes), `input.log`, `answers.log` (auto-answers)
+- `sessions/<uuid>/meta.json`, `input.log`, `answers.log` (auto-answers), and for **shell sessions only** `output.log` (raw PTY bytes).
+  Claude Code and OpenCode sessions (`meta.claude` set) write no `output.log`: a full-screen TUI repaints the whole screen, so one
+  short OpenCode chat produced 28 MB. Their history is the agent's own transcript, read in place and never copied (see below).
+  `bytesWritten` stays in `meta.json` and counts `output.log` bytes, so it is `0` for agent sessions. An `output.log` left by an
+  older version is not touched or shown; it is removed with the rest of the folder by *Delete* / `hub rm`.
 - `token` (0600), `api.json` (0600, rewritten on start, removed on clean quit), `update.json` (optional), `update.log`
 
 Nothing is pruned automatically. Deleting is explicit: *Delete session* (the ×) and *Delete selected* delete at once with no
@@ -73,7 +78,7 @@ Quitting stops running processes (SIGHUP, SIGKILL after 3 s), records the exit, 
 - Sessions are grouped by working folder (header: folder name + shortened path). A group with a running or waiting session
   sits above idle groups; otherwise groups are ordered by their newest session, and sessions inside a group newest first.
 - **Archive** hides a finished session in the collapsed *Archived (N)* section at the bottom (click to expand). Archived rows can
-  still be opened (output replay), unarchived and deleted. `meta.json` carries `archived: boolean` (missing = `false`);
+  still be opened (output replay, or the agent's transcript), unarchived and deleted. `meta.json` carries `archived: boolean` (missing = `false`);
   a running session cannot be archived (400), and resuming an archived session unarchives it. New sessions are never archived.
 - **Select** switches the rows to checkboxes (a row click toggles instead of opening). The header shows `N selected`,
   *Delete selected* and *Cancel*. Running sessions in the selection are killed, then every folder is removed. No confirmation.
@@ -82,8 +87,16 @@ Quitting stops running processes (SIGHUP, SIGKILL after 3 s), records the exit, 
 
 A command that runs `claude` (directly, via `env`, an absolute path, `npx …`) is started with `--session-id <uuid>`;
 `meta.claude` records `configDir`, `sessionId`, `argvTemplate`, `resumeCommand`. **Resume** (button, `POST /sessions/:id/resume`,
-`hub resume`) relaunches in the same entry with `claude --resume <uuid>` and the same cwd/env, appending to the same
-`output.log` after a `── resumed … ──` line. Other commands get **Restart**. Nothing is ever resumed automatically.
+`hub resume`) relaunches in the same entry with `claude --resume <uuid>` and the same cwd/env; the live view shows a
+`── resumed … ──` line. Other commands get **Restart**. Nothing is ever resumed automatically.
+
+**History comes from Claude's own transcript**, `<configDir>/projects/<cwd with non-alphanumerics as ->/<uuid>.jsonl`
+(`configDir` = `meta.claude.configDir`; the real path of the cwd is tried too). Nothing is written to `output.log`.
+A session that has ended shows that transcript as plain text in its pane instead of replaying the screen: the user and assistant
+text in file order, as `── user ──` / `── assistant ──` blocks. Tool calls and results, thinking, subagent (sidechain) turns,
+meta rows and unreadable lines are left out. Before the first message there is no file yet, and the pane says so. A running
+session is shown live; its last 2 MB of output are also kept **in memory only** (never on disk) so that switching away from the
+session and back repaints the screen. If Claude Code deletes old transcripts, that history is gone from the hub too.
 
 **Session title.** Like a tab title in iTerm2, the title follows the terminal-title escape sequences the program prints
 (OSC 0 and OSC 2, ended by BEL or `ESC \`; OSC 1 is ignored), so Claude Code can name its own session; the change is
@@ -101,6 +114,12 @@ stays empty until then: the app polls opencode's SQLite store (`$XDG_DATA_HOME/o
 cwd, and records its `ses_…` id. **Resume** relaunches with `opencode --session <id>` and the same cwd/env. Until an id exists
 (no message sent yet) the session cannot be resumed. A user `-s/--session` or `-c/--continue` in the command is stripped
 from the resume command.
+
+**History comes from opencode's own database**, read in place with the system `sqlite3` (`-readonly`): the `text` parts of
+`meta.claude.sessionId`, joined to their messages and ordered by message then part creation time, shown as
+`── user ──` / `── assistant ──` blocks. Reasoning, tool, synthetic and ignored parts are left out. Nothing is written to
+`output.log`. If the database is missing, locked or corrupt the pane shows `(history unavailable: …)` instead of failing.
+Until the id is discovered the pane says there is no transcript yet. Live output and the 2 MB in-memory tail work as for Claude Code.
 
 The app never edits Claude's own settings: your `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`) is never touched.
 Hooks are injected per launch with `--settings`, see below.
@@ -187,9 +206,17 @@ up and reply with `hub answer <id> …` instead of polling. Create `~/Library/Ap
 ## HTTP API (127.0.0.1, `Authorization: Bearer <token>` except `/health`)
 
 `GET /health` · `GET /sessions[?attention=1]` (includes archived sessions; each has `archived`) · `POST /sessions` · `GET /sessions/:id` · `GET …/output?offset&limit` · `GET …/text?offset` ·
-`GET …/stream` (SSE) · `GET /events` (SSE: attention + turn + exit) · `POST …/input` · `POST …/answer` · `POST …/stop` · `POST …/resume` ·
+`GET …/stream` (SSE, live output only) · `GET /events` (SSE: attention + turn + exit) · `POST …/input` · `POST …/answer` · `POST …/stop` · `POST …/resume` ·
 `POST …/title` `{ "title": "…" }` pins, `{ "auto": true }` unpins · `POST …/archive` `{ "archived": true|false }` (returns the session; 400 while it runs) · `DELETE /sessions/:id` ·
 `POST /sessions/delete` `{ "ids": [...] }` (no confirmation; kills running ones; 404 and nothing deleted if an id is unknown) · `POST /hooks/claude`
+
+**History endpoints.** For a shell session `…/output` is the raw `output.log` bytes and `…/text` the same log with ANSI stripped.
+For a Claude Code or OpenCode session (no `output.log`) both serve the agent's transcript, rendered as plain UTF-8 text with
+`\n` line ends (`── user ──` / `── assistant ──` blocks): `…/text` as `text/plain`, `…/output` as the same bytes with
+`application/octet-stream`. `offset` and `limit` are byte positions in that rendered text and `X-Total-Bytes` is its length. When
+the transcript cannot be read the body is one `(history unavailable: …)` or `(no transcript yet: …)` line, status 200. `…/stream` never
+replays history for any session: it follows output from the moment it connects. `hub text <id>` calls `…/text` (so it prints the
+transcript for agent sessions); `hub text <id> --follow` follows `…/stream`.
 
 ## CLI
 
