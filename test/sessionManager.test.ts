@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { encodeCwd, isUuid } from '../src/main/claude';
+import { createApiServer, listenOnLoopback } from '../src/main/apiServer';
 import { SessionManager } from '../src/main/sessionManager';
 import { SessionStore } from '../src/main/sessionStore';
 import type { SessionInfo, SessionMeta } from '../src/shared/types';
@@ -492,5 +493,26 @@ describe('SessionManager — terminal title escapes', () => {
     delete legacy.titleSource;
     writeFileSync(metaPath, JSON.stringify(legacy));
     expect(manager().get(id)?.titleSource).toBe('auto');
+  });
+});
+
+describe('SessionManager — human-created sessions', () => {
+  it('creates a session with no listener immediately and reports listeners: []', async () => {
+    const m = manager();
+    // The window's New Session path calls start() directly, with no listeners and no handshake.
+    const created = m.start({ cwd: work, command: '/bin/sh', args: ['-c', 'true'] });
+    expect(created.listeners).toEqual([]);
+    expect(m.get(created.id)?.listeners).toEqual([]);
+    expect(existsSync(join(base, 'sessions', created.id, 'listeners.json'))).toBe(false);
+    const server = createApiServer({ service: m, token: 'human-path-token-0123456789abcdef', version: 't', startedAt: '2026-01-01T00:00:00.000Z' });
+    const port = await listenOnLoopback(server);
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/${created.id}`, { headers: { Authorization: 'Bearer human-path-token-0123456789abcdef' } });
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as SessionInfo).listeners).toEqual([]);
+    } finally {
+      await new Promise<void>((resolve) => void server.close(() => resolve()));
+    }
+    await exited(m, created.id);
   });
 });

@@ -7,6 +7,7 @@ import { build } from 'esbuild';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApiServer, listenOnLoopback } from '../src/main/apiServer';
 import type { SessionService } from '../src/main/service';
+import type { SessionListeners } from '../src/main/sessionListeners';
 import type { SessionInfo } from '../src/shared/types';
 
 const TOKEN = 'cli-test-token-0123456789abcdef0123456789abcdef';
@@ -30,6 +31,27 @@ const resized: [string, number, number][] = [];
 let removedAll = 0;
 
 // Only the methods the CLI paths under test reach; anything else would be a test bug.
+const listenBodies: unknown[] = [];
+const listenWaits: (boolean | undefined)[] = [];
+const listenerService = {
+  create: (options: unknown, listeners: unknown) => {
+    started.push(options);
+    listenBodies.push(listeners);
+    return Promise.resolve({ status: 201, body: { id: NEW, listeners: [] } });
+  },
+  addListener: (_id: string, listener: unknown, wait?: boolean) => {
+    listenBodies.push(listener);
+    listenWaits.push(wait);
+    return Promise.resolve({ status: 201, body: { listeners: [{ id: 'lst_1' }] } });
+  },
+  ack: (id: string) => ({ id, state: 'acked', expiresAt: '2026-01-01T00:00:30.000Z', sessionId: null }),
+  list: () => [],
+  remove: () => undefined,
+  resumeListener: () => ({}),
+  events: () => ({ events: [{ eventId: 'evt_1', seq: 1, event: 'attention' }], next: 1 }),
+  deliveries: () => [],
+} as unknown as SessionListeners;
+
 const service = {
   list: () => sessions,
   get: (id: string) => sessions.find((s) => s.id === id),
@@ -55,7 +77,7 @@ beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'thub-cli-json-'));
   cli = join(dir, 'hub.cjs');
   await build({ entryPoints: [join(__dirname, '..', 'src', 'cli', 'hub.ts')], outfile: cli, bundle: true, platform: 'node', format: 'cjs', target: 'node22', logLevel: 'silent' });
-  server = createApiServer({ service, token: TOKEN, version: '9.9.9', startedAt: '2026-01-01T00:00:00.000Z' });
+  server = createApiServer({ service, listeners: listenerService, token: TOKEN, version: '9.9.9', startedAt: '2026-01-01T00:00:00.000Z' });
   const port = await listenOnLoopback(server);
   writeFileSync(join(dir, 'api.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}`, token: TOKEN, pid: 4242 }));
 });
@@ -66,7 +88,7 @@ afterAll(async () => {
 
 function hub(args: string[], dataDir: string = dir): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    execFile(process.execPath, [cli, ...args], { env: { PATH: process.env.PATH ?? '', TERMINAL_HUB_DATA_DIR: dataDir } }, (error, stdout, stderr) => {
+    execFile(process.execPath, [cli, ...args], { env: { ...process.env, PATH: process.env.PATH ?? '', TERMINAL_HUB_DATA_DIR: dataDir } }, (error, stdout, stderr) => {
       resolve({ code: error ? ((error as { code?: number }).code ?? 1) : 0, stdout, stderr });
     });
   });
@@ -115,14 +137,15 @@ describe('hub --json', () => {
 
   it('run --detach --json starts the session, prints {"id"} and exits 0 without following', async () => {
     started.length = 0;
-    const result = await hub(['run', '--detach', '--json', '--', 'sleep', '30', '--json']);
+    const result = await hub(['run', '--detach', '--json', '--listen', 'cmd:/bin/echo', '--', 'sleep', '30', '--json']);
     expect(result.code).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({ id: NEW });
     expect(started).toMatchObject([{ command: 'sleep', args: ['30', '--json'] }]);
+    expect(listenBodies.at(-1)).toMatchObject([{ kind: 'command', command: { argv: ['/bin/echo'] } }]);
   });
 
   it('run --detach in human mode prints only the id', async () => {
-    const result = await hub(['run', '--detach', '--', 'sleep', '30']);
+    const result = await hub(['run', '--detach', '--listen', 'cmd:/bin/echo', '--', 'sleep', '30']);
     expect(result.code).toBe(0);
     expect(result.stdout).toBe(`${NEW}\n`);
   });
@@ -269,5 +292,51 @@ describe('hub <command> --help', () => {
     expect(result.stdout).toContain('exit codes:');
     expect(result.stdout).toContain('data dir:');
     expect(result.stdout).not.toContain('hub watch');
+  });
+});
+
+
+describe('hub listeners, ack and events', () => {
+  it('parses a listener spec into the request shape, including filter, header and bearer-env', async () => {
+    process.env.HUB_TEST_BEARER = 'tok-123';
+    listenBodies.length = 0;
+    const result = await hub(['run', '--detach', '--listen', 'http:https://agent.example/hook#events=attention,turn#header=X-Run:42#bearer-env=HUB_TEST_BEARER', '--', 'sleep', '30']);
+    expect(result.code).toBe(0);
+    expect(listenBodies.at(-1)).toEqual([
+      { kind: 'http', events: ['attention', 'turn'], http: { url: 'https://agent.example/hook', headers: { 'X-Run': '42' }, bearer: 'tok-123' } },
+    ]);
+    delete process.env.HUB_TEST_BEARER;
+  });
+
+  it('refuses a spec with an unknown event name before contacting the hub', async () => {
+    const result = await hub(['run', '--detach', '--listen', 'cmd:/bin/echo#events=nope', '--', 'sleep', '30']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/unknown event name/);
+  });
+
+  it('refuses run with no listener: a session must not exist before one acks', async () => {
+    const result = await hub(['run', '--detach', '--', 'sleep', '30']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/--listen/);
+  });
+
+  it('listen adds exactly one listener to a resolved session', async () => {
+    listenBodies.length = 0;
+    const result = await hub(['listen', 'aaaa', '--listen', 'cmd:/bin/echo']);
+    expect(result.code).toBe(0);
+    expect(listenBodies.at(-1)).toEqual({ kind: 'command', command: { argv: ['/bin/echo'] } });
+    expect(listenWaits.at(-1)).toBe(true);
+  });
+
+  it('events --json prints the page as one JSON value', async () => {
+    const result = await hub(['events', 'aaaa', '--json']);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ next: 1, events: [{ seq: 1, event: 'attention' }] });
+  });
+
+  it('ack posts the token without a bearer and prints one JSON value', async () => {
+    const result = await hub(['ack', 'hs_1', 'the-token', '--json']);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ id: 'hs_1', state: 'acked' });
   });
 });

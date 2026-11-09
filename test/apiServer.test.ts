@@ -6,6 +6,7 @@ import { createApiServer, listenOnLoopback } from '../src/main/apiServer';
 import { resolveAnswer } from '../src/main/attention';
 import { HubError } from '../src/main/errors';
 import type { OutputChunk, SessionService } from '../src/main/service';
+import type { SessionListeners } from '../src/main/sessionListeners';
 import type { SessionInfo } from '../src/shared/types';
 
 const TOKEN = 'test-token-0123456789abcdef0123456789abcdef';
@@ -318,9 +319,49 @@ describe('API routes', () => {
     expect(written).toEqual(['ls\r']);
   });
 
+  it('POST /sessions/:id/listeners strips the route-level wait flag before listener validation', async () => {
+    const captured: { listener: unknown; wait: boolean }[] = [];
+    const stub = {
+      addListener: (_id: string, listener: unknown, wait: boolean) => {
+        captured.push({ listener, wait });
+        return Promise.resolve({ status: 201, body: { listeners: [{ id: 'lst_1' }] } });
+      },
+      list: () => [],
+      remove: () => undefined,
+      resumeListener: () => ({}),
+      events: () => ({ events: [], next: 0 }),
+      deliveries: () => [],
+      ack: () => ({}),
+      handshake: () => ({}),
+      create: () => Promise.resolve({ status: 201, body: {} }),
+    } as unknown as SessionListeners;
+    const extra = createApiServer({ service, listeners: stub, token: TOKEN, version: '9.9.9', startedAt: '2026-01-01T00:00:00.000Z' });
+    const extraPort = await listenOnLoopback(extra);
+    try {
+      const status = await new Promise<number>((resolve, reject) => {
+        const body = JSON.stringify({ kind: 'command', command: { argv: ['/bin/echo'] }, wait: false });
+        const req = http.request(
+          { host: '127.0.0.1', port: extraPort, path: `/sessions/${RUNNING}/listeners`, method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' } },
+          (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode ?? 0));
+          },
+        );
+        req.on('error', reject);
+        req.end(body);
+      });
+      expect(status).toBe(201);
+      expect(captured[0]).toEqual({ listener: { kind: 'command', command: { argv: ['/bin/echo'] } }, wait: false });
+    } finally {
+      await new Promise<void>((resolve) => void extra.close(() => resolve()));
+    }
+  });
+
   it('validates POST /sessions and maps unknown ids to 404', async () => {
     expect((await request('/sessions', { method: 'POST', headers: auth, body: '{"cwd":"rel","command":"ls"}' })).status).toBe(400);
-    expect((await request('/sessions', { method: 'POST', headers: auth, body: '{"cwd":"/tmp","command":"ls"}' })).status).toBe(201);
+    // A session cannot be created through the API without at least one listener, even when the rest is valid.
+    expect((await request('/sessions', { method: 'POST', headers: auth, body: '{"cwd":"/tmp","command":"ls"}' })).status).toBe(400);
+    expect((await request('/sessions', { method: 'POST', headers: auth, body: '{"cwd":"/tmp","command":"ls","listeners":[]}' })).status).toBe(400);
     expect((await request('/sessions/33333333-3333-4333-8333-333333333333', { headers: auth })).status).toBe(404);
   });
 
