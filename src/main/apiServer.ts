@@ -56,6 +56,11 @@ function optionalInt(value: unknown, name: string): number | undefined {
   return value;
 }
 
+function requiredInt(value: unknown, name: string): number {
+  if (value === undefined) throw new HubError(400, `${name} is required`);
+  return optionalInt(value, name) as number;
+}
+
 function parseStartOptions(body: Record<string, unknown>): StartSessionOptions {
   const { cwd, command, args, title, env } = body;
   if (typeof cwd !== 'string' || !cwd.startsWith('/')) throw new HubError(400, 'cwd must be an absolute path string');
@@ -194,7 +199,7 @@ export function createApiServer(options: ApiOptions): Server {
     const method = req.method ?? 'GET';
 
     if (url.pathname === '/health' && method === 'GET') {
-      sendJson(res, 200, { ok: true, version: options.version, startedAt: options.startedAt });
+      sendJson(res, 200, { ok: true, version: options.version, startedAt: options.startedAt, pid: process.pid });
       return;
     }
     if (!isAuthorized(req.headers.authorization, token)) {
@@ -216,6 +221,12 @@ export function createApiServer(options: ApiOptions): Server {
       if (!Array.isArray(ids) || !ids.every((item) => typeof item === 'string')) throw new HubError(400, 'ids must be an array of strings');
       await service.removeMany(ids);
       return sendJson(res, 200, { ok: true, deleted: new Set(ids).size });
+    }
+
+    if (url.pathname === '/sessions/delete-all' && method === 'POST') {
+      const deleted = service.list().length;
+      await service.removeAll();
+      return sendJson(res, 200, { ok: true, deleted });
     }
 
     if (url.pathname === '/sessions') {
@@ -278,6 +289,14 @@ export function createApiServer(options: ApiOptions): Server {
         const body = await readJson(req);
         const request: AnswerRequest = { keys: body.keys as string | undefined, text: body.text as string | undefined, submit: body.submit as boolean | undefined };
         return sendJson(res, 200, { ok: true, sent: service.answer(id, request) });
+      }
+      if (action === 'resize') {
+        const body = await readJson(req);
+        const cols = requiredInt(body.cols, 'cols');
+        const rows = requiredInt(body.rows, 'rows');
+        if (!session.running) throw new HubError(409, 'session is not running');
+        service.resize(id, cols, rows);
+        return sendJson(res, 200, { ok: true, cols, rows });
       }
       if (action === 'resume') {
         service.resume(id);

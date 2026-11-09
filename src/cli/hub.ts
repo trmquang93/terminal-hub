@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { SessionInfo } from '../shared/types';
+import type { AttentionInfo, SessionInfo } from '../shared/types';
 import { loadNotifyConfig, notifyConfigPath } from '../main/notifyConfig';
 import { buildEvent, deliver, NotifyLog } from '../main/notifyDelivery';
 import { apiFilePath, dataDir } from '../main/paths';
@@ -11,10 +11,15 @@ declare const HUB_PACKAGED: boolean | undefined;
 const startHint = typeof HUB_PACKAGED !== 'undefined' && HUB_PACKAGED ? "open -a 'Terminal Hub'" : `cd ${resolve(__dirname, '..', '..')} && npm start`;
 
 const USAGE = `usage:
-  hub run [--cwd DIR] [--title T] [--unattended] [-q] -- CMD ARGS…   start a session, follow it, exit with its exit code
-  hub ls                                              list sessions (state, resumable, archived)
+  hub run [--cwd DIR] [--title T] [--unattended] [-q] [--json] -- CMD ARGS…   start a session, follow it, exit with its exit code
+  hub run --detach [--json] -- CMD ARGS…              start the session, print its id, exit 0 (never follows the output)
+  hub run --wait [--timeout S] [--json] -- CMD ARGS…  start detached, then block like hub wait
+  hub ls [--json]                                     list sessions (state, resumable, archived)
+  hub show <id> [--json]                              one session: full id, state, running, exitCode, cwd, command, title, archived, resumable, attention, turn
+  hub status [--json]                                 is the hub up: version, pid, startedAt, baseUrl, data dir, total / running / waiting counts
   hub text <id> [--follow]                            plain text: the agent's transcript (Claude Code, opencode) or the ANSI-stripped log (shell)
   hub send <id> "text" [--no-enter]                   type into a session (Enter appended by default)
+  hub resize <id> --cols N --rows N [--json]          resize the terminal of a running session (1..1000)
   hub stop <id>                                       SIGTERM, SIGKILL after 3 s
   hub resume <id> [--follow]                          resume (Claude Code) or restart (other commands)
   hub archive <id>                                    move a finished session to the Archived list (refused while it runs)
@@ -22,14 +27,39 @@ const USAGE = `usage:
   hub rename <id> <title>                             set the title and pin it (the program's terminal-title escapes no longer change it)
   hub rename <id> --auto                              unpin: the program's terminal-title escapes set the title again
   hub rm <id>                                         delete the session and its files
+  hub rm-all --yes [--json]                           delete EVERY session and its files (kills running ones); refuses without --yes
   hub watch                                           stream attention, turn (working|waiting|done) and exit events as JSON lines until Ctrl-C
   hub notify-test                                     send one synthetic "attention" event to the endpoint in notify.json and print the HTTP result
-  hub wait <id> [--timeout S]                         block until it needs attention (exit 10, prints the question) or exits (its code); 124 on timeout
+  hub wait <id> [--timeout S] [--json]                block until it needs attention (exit 10, prints the question) or exits (its code); 124 on timeout
   hub answer <id> <text|yes|no|enter|esc|tab|up|down|1-9> [--no-submit]
                                                       answer a prompt or type into the chat box (Enter is added for text, yes and no)
   hub answer <id> --keys '1\\r'                       write raw keys (\\r \\n \\t \\e escapes)
+  hub --help                                          this text (also: hub with no arguments), exit 0
+
+--json (ls, show, status, run, wait, resize, rm-all): stdout carries exactly one JSON value. A failure prints {"error":"…","code":N} to stderr and exits with the same code.
+
+exit codes: 0 ok · 1 error · 2 hub not running · 10 attention needed (wait) · 124 timeout (wait) · otherwise the child's exit code (run, wait)
+
+data dir: ${dataDir()}
+  (TERMINAL_HUB_DATA_DIR, else ~/Library/Application Support/TerminalHub)
 
 <id> may be any unique prefix of a session id.`;
+
+const JSON_COMMANDS = new Set(['ls', 'show', 'status', 'run', 'wait', 'resize', 'rm-all']);
+
+/** `--json` counts for the commands that support it; for `run` only before the `--` that starts the command. */
+function wantsJson(argv: string[]): boolean {
+  const [command, ...args] = argv;
+  if (!command || !JSON_COMMANDS.has(command)) return false;
+  const separator = command === 'run' ? args.indexOf('--') : -1;
+  return (separator < 0 ? args : args.slice(0, separator)).includes('--json');
+}
+
+const jsonMode = wantsJson(process.argv.slice(2));
+
+function printJson(value: unknown): void {
+  console.log(JSON.stringify(value));
+}
 
 class CliError extends Error {
   constructor(
@@ -43,6 +73,7 @@ class CliError extends Error {
 interface Api {
   baseUrl: string;
   token: string;
+  pid?: number;
 }
 
 function notRunning(): CliError {
@@ -51,8 +82,8 @@ function notRunning(): CliError {
 
 function loadApi(): Api {
   try {
-    const parsed = JSON.parse(readFileSync(apiFilePath(), 'utf8')) as Partial<Api>;
-    if (typeof parsed.baseUrl === 'string' && typeof parsed.token === 'string') return { baseUrl: parsed.baseUrl, token: parsed.token };
+    const parsed = JSON.parse(readFileSync(apiFilePath(), 'utf8')) as Partial<Api>; // api.json also carries the app's pid
+    if (typeof parsed.baseUrl === 'string' && typeof parsed.token === 'string') return { baseUrl: parsed.baseUrl, token: parsed.token, pid: parsed.pid };
   } catch {
     // fall through
   }
@@ -132,41 +163,55 @@ function describeAttention(session: Pick<SessionInfo, 'attention'>): string {
 const ATTENTION_EXIT_CODE = 10;
 const TIMEOUT_EXIT_CODE = 124;
 
-async function wait(api: Api, id: string, timeoutSeconds: number | null): Promise<number> {
-  const settled = (session: SessionInfo): number | null => {
-    if (!session.running) return exitCodeOf(session);
-    if (!session.attention) return null;
-    console.log(describeAttention(session));
-    return ATTENTION_EXIT_CODE;
+type WaitOutcome = { kind: 'exited'; code: number; signal: number | null } | { kind: 'attention'; attention: AttentionInfo };
+
+/** Resolves when the session exits or needs attention. Throws CliError(124) on timeout. */
+async function wait(api: Api, id: string, timeoutSeconds: number | null): Promise<WaitOutcome> {
+  const settled = (session: SessionInfo): WaitOutcome | null => {
+    if (!session.running) return { kind: 'exited', code: exitCodeOf(session), signal: session.signal };
+    return session.attention ? { kind: 'attention', attention: session.attention } : null;
   };
   const now = settled(await json<SessionInfo>(api, `/sessions/${id}`));
   if (now !== null) return now;
 
   const controller = new AbortController();
   const timer = timeoutSeconds === null ? null : setTimeout(() => controller.abort(), timeoutSeconds * 1000);
-  let code: number | null = null;
+  let outcome: WaitOutcome | null = null;
   try {
     const response = await fetch(`${api.baseUrl}/events`, { headers: { Authorization: `Bearer ${api.token}` }, signal: controller.signal });
     await readEvents(response, (event, data) => {
       const payload = JSON.parse(data) as SessionInfo & ExitEvent;
       if (payload.id !== id) return false;
-      if (event === 'exit') code = exitCodeOf(payload);
-      else if (event === 'attention' && payload.attention) {
-        console.log(describeAttention(payload));
-        code = ATTENTION_EXIT_CODE;
-      }
-      return code !== null;
+      if (event === 'exit') outcome = { kind: 'exited', code: exitCodeOf(payload), signal: payload.signal };
+      else if (event === 'attention' && payload.attention) outcome = { kind: 'attention', attention: payload.attention };
+      return outcome !== null;
     });
   } catch (error) {
     if (!controller.signal.aborted) throw error instanceof CliError ? error : notRunning();
-    console.error(`timed out after ${timeoutSeconds}s`);
-    return TIMEOUT_EXIT_CODE;
+    throw new CliError(`timed out after ${timeoutSeconds}s`, TIMEOUT_EXIT_CODE);
   } finally {
     if (timer) clearTimeout(timer);
     controller.abort();
   }
-  if (code === null) throw new CliError('event stream closed');
-  return code;
+  if (outcome === null) throw new CliError('event stream closed');
+  return outcome;
+}
+
+/** Prints the outcome of `wait` (one JSON value with --json) and returns the exit code. */
+function reportWait(id: string, outcome: WaitOutcome): number {
+  if (outcome.kind === 'attention') {
+    if (jsonMode) printJson({ id, status: 'attention', attention: outcome.attention, code: ATTENTION_EXIT_CODE });
+    else console.log(describeAttention({ attention: outcome.attention }));
+    return ATTENTION_EXIT_CODE;
+  }
+  if (jsonMode) printJson({ id, status: 'exited', exitCode: outcome.code, signal: outcome.signal, code: outcome.code });
+  return outcome.code;
+}
+
+function parseTimeout(flags: Map<string, string | true>): number | null {
+  const timeout = flags.has('--timeout') ? Number(flags.get('--timeout')) : null;
+  if (timeout !== null && !(timeout >= 0)) throw new CliError('--timeout needs a number of seconds');
+  return timeout;
 }
 
 /** Prints every attention, turn and exit event as one JSON line, until Ctrl-C (exit 0) or the app goes away. */
@@ -252,22 +297,111 @@ function pad(value: string, width: number): string {
 async function run(api: Api, args: string[]): Promise<number> {
   const separator = args.indexOf('--');
   if (separator < 0 || separator === args.length - 1) throw new CliError(`hub run needs a command after --\n\n${USAGE}`);
-  const { flags } = parseFlags(args.slice(0, separator), ['--cwd', '--title'], ['-q', '--quiet', '--unattended']);
+  const { flags } = parseFlags(args.slice(0, separator), ['--cwd', '--title', '--timeout'], ['-q', '--quiet', '--unattended', '--json', '--detach', '--wait']);
+  const timeout = parseTimeout(flags);
   const [command = '', ...commandArgs] = args.slice(separator + 1);
   const { id } = await json<{ id: string }>(api, '/sessions', {
     method: 'POST',
     body: { cwd: resolve(String(flags.get('--cwd') ?? process.cwd())), command, args: commandArgs, title: flags.get('--title'), unattended: flags.has('--unattended') || undefined },
   });
-  console.log(id);
-  const quiet = flags.has('-q') || flags.has('--quiet');
-  return exitCodeOf(await follow(api, id, (text) => (quiet ? undefined : void process.stdout.write(text))));
+  if (!jsonMode) console.log(id);
+  if (flags.has('--wait')) return reportWait(id, await wait(api, id, timeout));
+  if (flags.has('--detach')) {
+    if (jsonMode) printJson({ id });
+    return 0;
+  }
+  const quiet = jsonMode || flags.has('-q') || flags.has('--quiet');
+  const exit = await follow(api, id, (text) => (quiet ? undefined : void process.stdout.write(text)));
+  if (jsonMode) printJson({ id, exitCode: exit.exitCode, signal: exit.signal, code: exitCodeOf(exit) });
+  return exitCodeOf(exit);
+}
+
+interface Health {
+  version?: string;
+  startedAt?: string;
+  pid?: number;
+}
+
+async function status(api: Api): Promise<number> {
+  let health: Health;
+  try {
+    const response = await fetch(`${api.baseUrl}/health`);
+    if (!response.ok) throw new CliError(`error ${response.status}: ${response.statusText}`);
+    health = (await response.json()) as Health;
+  } catch (error) {
+    throw error instanceof CliError ? error : notRunning();
+  }
+  const sessions = await json<SessionInfo[]>(api, '/sessions');
+  const result = {
+    running: true,
+    version: health.version ?? null,
+    pid: health.pid ?? api.pid ?? null,
+    startedAt: health.startedAt ?? null,
+    baseUrl: api.baseUrl,
+    dataDir: dataDir(),
+    total: sessions.length,
+    sessionsRunning: sessions.filter((s) => s.running).length,
+    // waiting: needs a decision from the caller, i.e. attention is set or the agent's turn is `waiting`
+    waiting: sessions.filter((s) => s.running && (s.attention !== null || s.turn?.state === 'waiting')).length,
+  };
+  if (jsonMode) printJson(result);
+  else {
+    console.log(`Terminal Hub ${result.version ?? '?'} is running`);
+    console.log(`pid:        ${result.pid ?? '?'}`);
+    console.log(`started:    ${result.startedAt ?? '?'}`);
+    console.log(`api:        ${result.baseUrl}`);
+    console.log(`data dir:   ${result.dataDir}`);
+    console.log(`sessions:   ${result.total} total, ${result.sessionsRunning} running, ${result.waiting} waiting`);
+  }
+  return 0;
+}
+
+function show(session: SessionInfo): number {
+  if (jsonMode) {
+    printJson(session);
+    return 0;
+  }
+  const attention = session.attention ? `${session.attention.reason} (${session.attention.source}) since ${session.attention.since}` : '-';
+  const rows: [string, string][] = [
+    ['id', session.id],
+    ['state', session.state],
+    ['running', String(session.running)],
+    ['exitCode', session.exitCode === null ? '-' : String(session.exitCode)],
+    ['cwd', session.cwd],
+    ['command', [session.command, ...session.argv].join(' ')],
+    ['title', session.title],
+    ['archived', String(session.archived)],
+    ['resumable', String(session.resumable)],
+    ['attention', attention],
+    ['turn', session.turn ? `${session.turn.state} since ${session.turn.since}` : '-'],
+  ];
+  for (const [key, value] of rows) console.log(`${pad(key, 10)} ${value}`);
+  return 0;
+}
+
+/** `hub <command> --help`: that command's usage lines plus the shared --json, exit code and data dir notes. */
+function commandHelp(command: string): string | null {
+  const [head = '', ...tail] = USAGE.split('\n\n');
+  const lines: string[] = [];
+  let inCommand = false;
+  for (const line of head.split('\n')) {
+    if (/^ {2}hub /.test(line)) inCommand = line.startsWith(`  hub ${command} `) || line === `  hub ${command}`;
+    if (inCommand) lines.push(line);
+  }
+  return lines.length === 0 ? null : [['usage:', ...lines].join('\n'), ...tail].join('\n\n');
 }
 
 async function main(argv: string[]): Promise<number> {
   const [command, ...args] = argv;
+  const flagArgs = command === 'run' ? args.slice(0, Math.max(args.indexOf('--'), args.includes('--') ? 0 : args.length)) : args;
+  const help = command && (flagArgs.includes('--help') || flagArgs.includes('-h')) ? commandHelp(command) : null;
+  if (help) {
+    console.log(help);
+    return 0;
+  }
   if (!command || command === '-h' || command === '--help' || command === 'help') {
     console.log(USAGE);
-    return command ? 0 : 1;
+    return 0;
   }
   if (command === 'hook-notify') {
     await hookNotify();
@@ -280,8 +414,37 @@ async function main(argv: string[]): Promise<number> {
       return run(api, args);
     case 'watch':
       return watch(api);
+    case 'status':
+      parseFlags(args, [], ['--json']);
+      return status(api);
+    case 'show': {
+      const { rest } = parseFlags(args, [], ['--json']);
+      return show(await json<SessionInfo>(api, `/sessions/${await resolveId(api, rest[0])}`));
+    }
+    case 'resize': {
+      const { flags, rest } = parseFlags(args, ['--cols', '--rows'], ['--json']);
+      const [cols, rows] = [Number(flags.get('--cols')), Number(flags.get('--rows'))];
+      if (![cols, rows].every((n) => Number.isInteger(n) && n >= 1 && n <= 1000)) throw new CliError(`give --cols N and --rows N (integers 1..1000)\n\n${USAGE}`);
+      const sessionId = await resolveId(api, rest[0]);
+      await call(api, `/sessions/${sessionId}/resize`, { method: 'POST', body: { cols, rows } });
+      if (jsonMode) printJson({ sessionId, cols, rows });
+      return 0;
+    }
+    case 'rm-all': {
+      const { flags } = parseFlags(args, [], ['--yes', '--json']);
+      if (!flags.has('--yes')) throw new CliError('hub rm-all deletes every session and its files, running ones included. Re-run with --yes to confirm.');
+      const { deleted } = await json<{ deleted: number }>(api, '/sessions/delete-all', { method: 'POST' });
+      if (jsonMode) printJson({ deleted });
+      else console.log(`deleted ${deleted}`);
+      return 0;
+    }
     case 'ls': {
+      parseFlags(args, [], ['--json']);
       const sessions = (await json<SessionInfo[]>(api, '/sessions')).sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+      if (jsonMode) {
+        printJson(sessions);
+        return 0;
+      }
       const widths = [36, 12, 10, 9, 5, 20, 30, 0];
       console.log(['ID', 'STATE', 'RESUMABLE', 'ARCHIVED', 'EXIT', 'STARTED', 'CWD', 'TITLE'].map((h, i) => pad(h, widths[i] ?? 0)).join(' '));
       for (const s of sessions) {
@@ -307,10 +470,10 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case 'wait': {
-      const { flags, rest } = parseFlags(args, ['--timeout'], []);
-      const timeout = flags.has('--timeout') ? Number(flags.get('--timeout')) : null;
-      if (timeout !== null && !(timeout >= 0)) throw new CliError('--timeout needs a number of seconds');
-      return wait(api, await resolveId(api, rest[0]), timeout);
+      const { flags, rest } = parseFlags(args, ['--timeout'], ['--json']);
+      const timeout = parseTimeout(flags);
+      const id = await resolveId(api, rest[0]);
+      return reportWait(id, await wait(api, id, timeout));
     }
     case 'answer': {
       const { flags, rest } = parseFlags(args, ['--keys'], ['--no-submit']);
@@ -360,7 +523,9 @@ async function main(argv: string[]): Promise<number> {
 main(process.argv.slice(2)).then(
   (code) => process.exit(code),
   (error: unknown) => {
-    console.error(error instanceof CliError ? error.message : error);
-    process.exit(error instanceof CliError ? error.code : 1);
+    const code = error instanceof CliError ? error.code : 1;
+    if (jsonMode) console.error(JSON.stringify({ error: (error instanceof Error ? error.message : String(error)).split('\n\nusage:')[0], code }));
+    else console.error(error instanceof CliError ? error.message : error);
+    process.exit(code);
   },
 );

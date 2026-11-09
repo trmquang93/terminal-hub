@@ -1,5 +1,21 @@
 # Terminal Hub
 
+## What this is
+
+Terminal Hub is a **terminal for agents**. Its primary user is an AI agent that starts a session, sends input, reads text back,
+waits for a decision and kills it, usually with nobody at the screen. The Electron window is a convenience layer: everything you
+can do in the window is also reachable through the `hub` CLI and the local HTTP API, and that has to stay true.
+
+1. **Two clients, one surface.** A feature that exists only as a button, menu item or IPC call is a bug.
+2. **Non-interactive first.** Every command finishes without a TTY, prompt or confirmation (`hub rm-all` takes `--yes`, never asks).
+3. **Machine-readable where it matters.** `--json` on every read command and on errors: stdout carries exactly one JSON value,
+   a failure prints `{"error":"…","code":N}` to stderr.
+4. **Stable identity.** A session uuid survives restart, resume, rename and archive; any unique prefix is accepted.
+5. **Text on disk.** Shell output is a readable file; an agent session's history is its own transcript as plain text.
+6. **Meaningful exit codes.** 0 ok, 1 error, 2 hub not running, 10 attention needed, 124 timeout, otherwise the child's exit code.
+7. **Self-describing.** `hub --help` lists the commands, flags, exit codes and the data dir.
+8. **No surprise interruption.** Nothing kills or restarts a running session behind an agent's back.
+
 macOS desktop app (Electron + TypeScript + React + node-pty + xterm.js) that hosts real terminals.
 Every session is recorded on disk and stays in the list until you delete it by hand. Shell sessions keep their raw output;
 Claude Code and OpenCode sessions keep none and show the agent's own transcript instead.
@@ -205,10 +221,10 @@ up and reply with `hub answer <id> …` instead of polling. Create `~/Library/Ap
 
 ## HTTP API (127.0.0.1, `Authorization: Bearer <token>` except `/health`)
 
-`GET /health` · `GET /sessions[?attention=1]` (includes archived sessions; each has `archived`) · `POST /sessions` · `GET /sessions/:id` · `GET …/output?offset&limit` · `GET …/text?offset` ·
-`GET …/stream` (SSE, live output only) · `GET /events` (SSE: attention + turn + exit) · `POST …/input` · `POST …/answer` · `POST …/stop` · `POST …/resume` ·
+`GET /health` (`ok`, `version`, `startedAt`, `pid`) · `GET /sessions[?attention=1]` (includes archived sessions; each has `archived`) · `POST /sessions` · `GET /sessions/:id` · `GET …/output?offset&limit` · `GET …/text?offset` ·
+`GET …/stream` (SSE, live output only) · `GET /events` (SSE: attention + turn + exit) · `POST …/input` · `POST …/answer` · `POST …/resize` `{ "cols": 1..1000, "rows": 1..1000 }` (400 otherwise, 409 when not running) · `POST …/stop` · `POST …/resume` ·
 `POST …/title` `{ "title": "…" }` pins, `{ "auto": true }` unpins · `POST …/archive` `{ "archived": true|false }` (returns the session; 400 while it runs) · `DELETE /sessions/:id` ·
-`POST /sessions/delete` `{ "ids": [...] }` (no confirmation; kills running ones; 404 and nothing deleted if an id is unknown) · `POST /hooks/claude`
+`POST /sessions/delete` `{ "ids": [...] }` (no confirmation; kills running ones; 404 and nothing deleted if an id is unknown) · `POST /sessions/delete-all` → `{ "ok": true, "deleted": N }` (no confirmation, kills running ones) · `POST /hooks/claude`
 
 **History endpoints.** For a shell session `…/output` is the raw `output.log` bytes and `…/text` the same log with ANSI stripped.
 For a Claude Code or OpenCode session (no `output.log`) both serve the agent's transcript, rendered as plain UTF-8 text with
@@ -221,13 +237,23 @@ transcript for agent sessions); `hub text <id> --follow` follows `…/stream`.
 ## CLI
 
 ```
-hub run [--cwd DIR] [--title T] [--unattended] [-q] -- CMD ARGS…   exits with the child's code
-hub ls                          marks archived sessions in an ARCHIVED column
+hub run [--cwd DIR] [--title T] [--unattended] [-q] [--json] -- CMD ARGS…   exits with the child's code
+hub run --detach [--json] -- CMD ARGS…    print the id, exit 0, never follow the output
+hub run --wait [--timeout S] -- CMD ARGS… start detached, then block like hub wait
+hub ls [--json]                 marks archived sessions in an ARCHIVED column
+hub show <id> [--json]          full id, state, running, exitCode, cwd, command, title, archived, resumable, attention, turn
+hub status [--json]             version, pid, startedAt, baseUrl, data dir, total / running / waiting (exit 2 when the hub is down)
 hub text <id> [--follow] | send <id> "text" | stop <id> | rm <id> | resume <id> [--follow]
+hub resize <id> --cols N --rows N              (1..1000)
+hub rm-all --yes                delete every session and its files (kills running ones); refuses without --yes
 hub archive <id> | unarchive <id>
 hub rename <id> <title> | rename <id> --auto   pin a title / let the program's terminal title set it again
-hub wait <id> [--timeout S]     exit 10 on attention (prints the question), child's code on exit, 124 on timeout
+hub wait <id> [--timeout S] [--json]   exit 10 on attention (prints the question), child's code on exit, 124 on timeout
 hub answer <id> yes|no|enter|esc|tab|up|down|1-9|<text>
 hub watch                       stream attention / turn / exit events as JSON lines (Ctrl-C exits 0)
 hub notify-test                 send one synthetic attention event to the webhook in notify.json
+hub --help                      commands, flags, exit codes and the data dir (also: `hub` with no arguments), exit 0
 ```
+
+`--json` (ls, show, status, run, wait): stdout is exactly one JSON value; a failure prints `{"error":"…","code":N}` to stderr and exits
+with the same code as the human path. `hub status` counts a running session as *waiting* when its attention is set or its turn is `waiting`.

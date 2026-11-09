@@ -25,6 +25,8 @@ const sessions = [info(RUNNING, true), info(EXITED, false)];
 const written: string[] = [];
 const hooks: unknown[] = [];
 const removedMany: string[][] = [];
+const resized: [string, number, number][] = [];
+let removedAll = 0;
 const attentionListeners = new Set<(session: SessionInfo) => void>();
 const outputListeners = new Set<(chunk: OutputChunk) => void>();
 const turnListeners = new Set<(session: SessionInfo) => void>();
@@ -62,6 +64,11 @@ const service: SessionService = {
     removedMany.push(ids);
     return Promise.resolve();
   },
+  removeAll: () => {
+    removedAll++;
+    return Promise.resolve();
+  },
+  resize: (id, cols, rows) => void resized.push([id, cols, rows]),
   setArchived: (id, archived) => {
     const index = sessions.findIndex((s) => s.id === id);
     const current = sessions[index] as SessionInfo;
@@ -121,7 +128,7 @@ describe('API auth', () => {
   it('serves /health without a token', async () => {
     const res = await request('/health');
     expect(res.status).toBe(200);
-    expect(JSON.parse(res.body)).toEqual({ ok: true, version: '9.9.9', startedAt: '2026-01-01T00:00:00.000Z' });
+    expect(JSON.parse(res.body)).toEqual({ ok: true, version: '9.9.9', startedAt: '2026-01-01T00:00:00.000Z', pid: process.pid });
   });
 
   it.each([
@@ -356,6 +363,48 @@ describe('API archive and batch delete', () => {
     expect((await post(`/sessions/${EXITED}/archive`, '{"archived":true}', {})).status).toBe(401);
     expect((await post('/sessions/delete', `{"ids":["${EXITED}"]}`, {})).status).toBe(401);
     expect(removedMany).toHaveLength(1);
+  });
+});
+
+describe('API resize and delete-all', () => {
+  const post = (path: string, body: string, headers: Record<string, string> = auth) => request(path, { method: 'POST', headers, body });
+
+  it('resizes a running session with POST /sessions/:id/resize', async () => {
+    resized.length = 0;
+    const result = await post(`/sessions/${RUNNING}/resize`, '{"cols":132,"rows":43}');
+    expect(result.status).toBe(200);
+    expect(JSON.parse(result.body)).toEqual({ ok: true, cols: 132, rows: 43 });
+    expect(resized).toEqual([[RUNNING, 132, 43]]);
+    expect((await post(`/sessions/${RUNNING}/resize`, '{"cols":1,"rows":1000}')).status).toBe(200);
+  });
+
+  it.each(['{}', '{"cols":80}', '{"rows":24}', '{"cols":0,"rows":24}', '{"cols":80,"rows":1001}', '{"cols":80.5,"rows":24}', '{"cols":"80","rows":24}', '{"cols":-5,"rows":24}', '{"cols":null,"rows":24}'])('rejects resize body %s (400)', async (body) => {
+    resized.length = 0;
+    expect((await post(`/sessions/${RUNNING}/resize`, body)).status).toBe(400);
+    expect(resized).toEqual([]);
+  });
+
+  it('refuses to resize an exited session (409), an unknown one (404) and a call without a token (401)', async () => {
+    resized.length = 0;
+    expect((await post(`/sessions/${EXITED}/resize`, '{"cols":80,"rows":24}')).status).toBe(409);
+    expect((await post('/sessions/33333333-3333-4333-8333-333333333333/resize', '{"cols":80,"rows":24}')).status).toBe(404);
+    expect((await post(`/sessions/${RUNNING}/resize`, '{"cols":80,"rows":24}', {})).status).toBe(401);
+    expect(resized).toEqual([]);
+  });
+
+  it('POST /sessions/delete-all removes everything and reports the count', async () => {
+    removedAll = 0;
+    const result = await post('/sessions/delete-all', '');
+    expect(result.status).toBe(200);
+    expect(JSON.parse(result.body)).toEqual({ ok: true, deleted: sessions.length });
+    expect(removedAll).toBe(1);
+  });
+
+  it('delete-all requires the token and rejects other methods', async () => {
+    removedAll = 0;
+    expect((await post('/sessions/delete-all', '', {})).status).toBe(401);
+    expect((await request('/sessions/delete-all', { headers: auth })).status).not.toBe(200);
+    expect(removedAll).toBe(0);
   });
 });
 

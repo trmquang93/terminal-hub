@@ -19,6 +19,8 @@ export interface SessionService {
   stop(id: string): void;
   remove(id: string): Promise<void>;
   removeMany(ids: string[]): Promise<void>;
+  removeAll(): Promise<void>;
+  resize(id: string, cols: number, rows: number): void;
   setArchived(id: string, archived: boolean): SessionInfo;
   setTitle(id: string, title: string): SessionInfo;
   releaseTitle(id: string): SessionInfo;
