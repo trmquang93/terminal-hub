@@ -88,6 +88,8 @@ export interface SessionInfo extends SessionMeta {
   resumable: boolean;
   /** Redacted per-session event listeners; absent or empty when the session has none. */
   listeners?: ListenerInfo[];
+  /** Only on the object start()/resume() returns after `force` went past the worktree guard: the session that was already running there. Never persisted, never on GET /sessions. */
+  forced?: { id: string; title: string; cwd: string };
 }
 
 export interface StartSessionOptions {
@@ -101,6 +103,8 @@ export interface StartSessionOptions {
   /** Enables the default safe auto-answer policy (approve "Do you want to proceed?" with Enter). */
   unattended?: boolean;
   autoAnswer?: AutoAnswerPolicy;
+  /** Start even when another session is already running in the same git worktree (otherwise refused with 409). */
+  force?: boolean;
   /** Per-session event listeners. Required on the agent surface (POST /sessions, hub run). */
   listeners?: ListenerRequest[];
 }

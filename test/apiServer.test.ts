@@ -33,11 +33,28 @@ const outputListeners = new Set<(chunk: OutputChunk) => void>();
 const turnListeners = new Set<(session: SessionInfo) => void>();
 const changedListeners = new Set<(session: SessionInfo) => void>();
 
+/** Stands in for the manager's worktree guard: this cwd always has a running session. */
+const BUSY_CWD = '/tmp/busy-worktree';
+const CONFLICT = { id: RUNNING, title: 'run', cwd: BUSY_CWD };
+
+function guard(cwd: string, force: boolean | undefined): typeof CONFLICT | undefined {
+  if (cwd !== BUSY_CWD) return undefined;
+  if (!force) throw new HubError(409, `another session is already running in this worktree — id: ${CONFLICT.id}, title: "${CONFLICT.title}", cwd: ${CONFLICT.cwd}. pass --force`, { conflict: CONFLICT });
+  return CONFLICT;
+}
+
 const service: SessionService = {
   list: () => sessions,
   get: (id) => sessions.find((s) => s.id === id),
-  start: () => info(RUNNING, true),
-  resume: (id) => {
+  start: (options) => {
+    const forced = guard(options.cwd, options.force);
+    return forced ? { ...info(RUNNING, true), forced } : info(RUNNING, true);
+  },
+  resume: (id, force) => {
+    if (id === EXITED) {
+      const forced = guard(BUSY_CWD, force);
+      return forced ? { ...info(EXITED, true), forced } : info(EXITED, true);
+    }
     throw new HubError(409, `cannot resume ${id}`);
   },
   write: (id, data) => {
@@ -368,6 +385,30 @@ describe('API routes', () => {
 
   it('surfaces resume conflicts as 409', async () => {
     expect((await request(`/sessions/${RUNNING}/resume`, { method: 'POST', headers: auth })).status).toBe(409);
+  });
+
+  it('POST /sessions into a worktree that is in use is 409 with the conflict; force starts and returns `forced`', async () => {
+    const body = (extra: string) => `{"cwd":"${BUSY_CWD}","command":"ls"${extra}}`;
+    const refused = await request('/sessions', { method: 'POST', headers: auth, body: body('') });
+    expect(refused.status).toBe(409);
+    expect(JSON.parse(refused.body)).toMatchObject({ conflict: CONFLICT, error: expect.stringContaining(`id: ${RUNNING}`) as string });
+    const forced = await request('/sessions', { method: 'POST', headers: auth, body: body(',"force":true') });
+    expect(forced.status).toBe(201);
+    expect(JSON.parse(forced.body)).toEqual({ id: RUNNING, listeners: [], forced: CONFLICT });
+    // another worktree is untouched, and `forced` is only on the answer, never on a later read
+    expect(JSON.parse((await request('/sessions', { method: 'POST', headers: auth, body: '{"cwd":"/tmp","command":"ls","force":true}' })).body)).toEqual({ id: RUNNING, listeners: [] });
+    expect((JSON.parse((await request(`/sessions/${RUNNING}`, { headers: auth })).body) as SessionInfo).forced).toBeUndefined();
+    expect((await request('/sessions', { method: 'POST', headers: auth, body: body(',"force":"yes"') })).status).toBe(400);
+  });
+
+  it('POST /sessions/:id/resume into a worktree that is in use is 409 with the conflict; {"force":true} resumes and returns `forced`', async () => {
+    const refused = await request(`/sessions/${EXITED}/resume`, { method: 'POST', headers: auth });
+    expect(refused.status).toBe(409);
+    expect(JSON.parse(refused.body)).toMatchObject({ conflict: CONFLICT });
+    const forced = await request(`/sessions/${EXITED}/resume`, { method: 'POST', headers: auth, body: '{"force":true}' });
+    expect(forced.status).toBe(200);
+    expect(JSON.parse(forced.body)).toEqual({ id: EXITED, forced: CONFLICT });
+    expect((await request(`/sessions/${EXITED}/resume`, { method: 'POST', headers: auth, body: '{"force":1}' })).status).toBe(400);
   });
 });
 

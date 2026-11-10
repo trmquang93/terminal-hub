@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { build } from 'esbuild';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApiServer, listenOnLoopback } from '../src/main/apiServer';
+import { HubError } from '../src/main/errors';
 import type { SessionService } from '../src/main/service';
 import type { SessionListeners } from '../src/main/sessionListeners';
 import type { SessionInfo } from '../src/shared/types';
@@ -24,9 +25,14 @@ function info(id: string, running: boolean, extra: Partial<SessionInfo> = {}): S
   };
 }
 
+// Stands in for the manager's worktree guard: this cwd always has a running session.
+const BUSY_CWD = '/tmp/cli-busy-worktree';
+const BUSY = { id: RUNNING, title: 't-aaaa', cwd: BUSY_CWD };
+
 const asking = { reason: 'prompt' as const, promptText: 'Proceed? [y/N]', since: '2026-01-01T00:00:05.000Z', source: 'heuristic' as const };
 const sessions = [info(RUNNING, true), info(EXITED, false), info(WAITING, true, { attention: asking })];
 const started: unknown[] = [];
+const resumed: { id: string; force?: boolean }[] = [];
 const resized: [string, number, number][] = [];
 let removedAll = 0;
 
@@ -55,9 +61,18 @@ const listenerService = {
 const service = {
   list: () => sessions,
   get: (id: string) => sessions.find((s) => s.id === id),
-  start: (options: unknown) => {
+  start: (options: { cwd: string; force?: boolean }) => {
     started.push(options);
+    if (options.cwd === BUSY_CWD) {
+      if (!options.force) throw new HubError(409, `another session is already running in this worktree — id: ${RUNNING}, title: "t-aaaa", cwd: ${BUSY_CWD}. pass --force`, { conflict: BUSY });
+      return { ...info(NEW, true), forced: BUSY };
+    }
     return info(NEW, true);
+  },
+  resume: (id: string, force?: boolean) => {
+    resumed.push({ id, force });
+    if (!force) throw new HubError(409, 'another session is already running in this worktree — pass --force', { conflict: BUSY });
+    return { ...info(id, true), forced: BUSY };
   },
   resize: (id: string, cols: number, rows: number) => void resized.push([id, cols, rows]),
   removeAll: () => {
@@ -142,6 +157,45 @@ describe('hub --json', () => {
     expect(JSON.parse(result.stdout)).toEqual({ id: NEW });
     expect(started).toMatchObject([{ command: 'sleep', args: ['30', '--json'] }]);
     expect(listenBodies.at(-1)).toMatchObject([{ kind: 'command', command: { argv: ['/bin/echo'] } }]);
+  });
+
+  it('run --json into a worktree that is in use: exit 1, stderr is one JSON error with the conflict, stdout empty', async () => {
+    started.length = 0;
+    const result = await hub(['run', '--detach', '--json', '--cwd', BUSY_CWD, '--', 'sleep', '30']);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(result.stderr)).toMatchObject({ code: 1, error: expect.stringContaining(`id: ${RUNNING}`) as string, conflict: BUSY });
+    expect(started).toMatchObject([{ cwd: BUSY_CWD }]);
+    expect((started[0] as { force?: boolean }).force).toBeUndefined();
+  });
+
+  it('run without --json prints the 409 message as before, no JSON', async () => {
+    const result = await hub(['run', '--detach', '--cwd', BUSY_CWD, '--', 'sleep', '30']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/^error 409: another session is already running in this worktree/);
+    expect(result.stderr).not.toContain('conflict');
+  });
+
+  it('run --force sends force:true, warns on stderr and keeps `forced` in the JSON on stdout', async () => {
+    started.length = 0;
+    const result = await hub(['run', '--detach', '--json', '--force', '--cwd', BUSY_CWD, '--', 'sleep', '30']);
+    expect(result.code).toBe(0);
+    expect(started).toMatchObject([{ cwd: BUSY_CWD, force: true }]);
+    expect(JSON.parse(result.stdout)).toEqual({ id: NEW, forced: BUSY });
+    expect(result.stderr).toBe(`warning: started a second session in the same worktree (already running: ${RUNNING} "t-aaaa")\n`);
+  });
+
+  it('resume is refused with 409 and --force goes through with a warning', async () => {
+    resumed.length = 0;
+    const refused = await hub(['resume', 'bbbb']);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain('error 409');
+    const forced = await hub(['resume', 'bbbb', '--force']);
+    expect(forced.code).toBe(0);
+    expect(forced.stdout).toBe(`${EXITED}\n`);
+    expect(forced.stderr).toContain(`already running: ${RUNNING} "t-aaaa"`);
+    expect(resumed).toEqual([{ id: EXITED, force: undefined }, { id: EXITED, force: true }]);
   });
 
   it('run --detach in human mode prints only the id', async () => {

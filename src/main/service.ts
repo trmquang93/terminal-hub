@@ -12,7 +12,7 @@ export interface SessionService {
   list(): SessionInfo[];
   get(id: string): SessionInfo | undefined;
   start(options: StartSessionOptions): SessionInfo;
-  resume(id: string): SessionInfo;
+  resume(id: string, force?: boolean): SessionInfo;
   write(id: string, data: string): void;
   answer(id: string, request: AnswerRequest): string;
   hookNotify(notification: { hubSessionId?: string; sessionId?: string; message: string; hookEvent?: string }): boolean;

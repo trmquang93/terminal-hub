@@ -14,6 +14,7 @@ import { OscTitleParser } from './oscTitle';
 import type { OutputChunk, SessionService } from './service';
 import type { SessionStore } from './sessionStore';
 import { nativeTranscript, renderTranscript, transcriptHasAssistantText } from './transcript';
+import { worktreeKey } from './worktree';
 
 const STOP_GRACE_MS = 3000;
 const ANSWER_CHUNK_GAP_MS = 150;
@@ -85,8 +86,8 @@ export interface ManagerOptions {
   attention?: { idleMs?: number; quietMs?: number };
   /** Refreshes hub's Claude hook settings file and returns its path (null: inject nothing). Called before every Claude launch; must not throw. */
   hooksFile?: () => string | null;
-  /** Diagnostics that are not errors (e.g. hook injection skipped). */
-  log?: (message: string) => void;
+  /** Diagnostics that are not errors (e.g. hook injection skipped); `level` defaults to INFO. */
+  log?: (message: string, level?: 'WARN') => void;
   /** The redacted listeners of a session, added to every SessionInfo the API returns. */
   listenerInfo?: (id: string) => ListenerInfo[];
 }
@@ -254,7 +255,34 @@ export class SessionManager implements SessionService {
 
   // --- lifecycle -----------------------------------------------------------
 
+  /**
+   * The running session in the same git worktree as `cwd`, other than `excludeId`. Only `this.live` counts: an exited,
+   * interrupted or archived session holds nothing. Synchronous, so the check and the spawn share one tick.
+   */
+  private worktreeConflict(cwd: string, excludeId?: string): SessionMeta | null {
+    const key = worktreeKey(cwd);
+    if (key === null) return null;
+    for (const id of this.live.keys()) {
+      const other = this.sessions.get(id);
+      if (other && id !== excludeId && worktreeKey(other.cwd) === key) return other;
+    }
+    return null;
+  }
+
+  /** Throws 409 when another session runs in this worktree; with `force` logs a WARN and returns the session it went past. */
+  private guardWorktree(cwd: string, force: boolean | undefined, excludeId?: string): SessionInfo['forced'] {
+    const other = this.worktreeConflict(cwd, excludeId);
+    if (!other) return undefined;
+    const conflict = { id: other.id, title: other.title, cwd: other.cwd };
+    if (!force) {
+      throw new HubError(409, `another session is already running in this worktree — id: ${other.id}, title: "${other.title}", cwd: ${other.cwd}. Send the next message to it (hub send ${other.id} …) or pass --force to start anyway.`, { conflict });
+    }
+    this.options.log?.(`forced a second session into a worktree already in use by ${other.id} "${other.title}" (${other.cwd}): ${cwd}`, 'WARN');
+    return conflict;
+  }
+
   start(options: StartSessionOptions): SessionInfo {
+    const forced = this.guardWorktree(options.cwd, options.force);
     const args = options.args ?? [];
     const env = options.env ?? {};
     const runsClaude = findClaudeIndex([options.command, ...args]) >= 0;
@@ -294,13 +322,14 @@ export class SessionManager implements SessionService {
     }
     this.sessions.set(meta.id, meta);
     this.emitChanged(meta);
-    return this.info(meta);
+    return forced ? { ...this.info(meta), forced } : this.info(meta);
   }
 
   /** Relaunches a finished session in place: `--resume <uuid>` for Claude Code, `--session <id>` for opencode, the original command otherwise. */
-  resume(id: string): SessionInfo {
+  resume(id: string, force?: boolean): SessionInfo {
     const meta = this.require(id);
     if (this.live.has(id)) throw new HubError(409, 'session is already running');
+    const forced = this.guardWorktree(meta.cwd, force, id);
     let args = meta.argv;
     if (meta.claude) {
       const { argvTemplate, sessionId, configDir, provider } = meta.claude;
@@ -330,7 +359,7 @@ export class SessionManager implements SessionService {
     this.appendOutput(meta, Buffer.from(`\r\n── resumed ${new Date().toISOString()} ──\r\n`));
     this.store.writeMeta(meta);
     this.emitChanged(meta);
-    return this.info(meta);
+    return forced ? { ...this.info(meta), forced } : this.info(meta);
   }
 
   private launch(meta: SessionMeta, args: string[]): void {

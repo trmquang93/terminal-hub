@@ -79,10 +79,12 @@ function parseStartOptions(body: Record<string, unknown>): StartSessionOptions {
   }
   const unattended = body.unattended;
   if (unattended !== undefined && typeof unattended !== 'boolean') throw new HubError(400, 'unattended must be a boolean');
+  if (body.force !== undefined && typeof body.force !== 'boolean') throw new HubError(400, 'force must be a boolean');
   return {
     cwd,
     command,
     unattended,
+    force: body.force,
     autoAnswer: parseAutoAnswer(body.autoAnswer as Partial<AutoAnswerPolicy> | null | undefined),
     args,
     title,
@@ -266,7 +268,7 @@ export function createApiServer(options: ApiOptions): Server {
         const listeners = body.listeners ?? [];
         if (listeners.length === 0) {
           const session = service.start(start);
-          return sendJson(res, 201, { id: session.id, listeners: [] });
+          return sendJson(res, 201, { id: session.id, listeners: [], ...(session.forced ? { forced: session.forced } : {}) });
         }
         if (!options.listeners) throw new HubError(400, 'this hub has no listener service; a session with listeners cannot be created');
         const result = await options.listeners.create({ ...start, wait: body.wait !== false }, listeners);
@@ -377,8 +379,10 @@ export function createApiServer(options: ApiOptions): Server {
         return sendJson(res, 200, { ok: true, cols, rows });
       }
       if (action === 'resume') {
-        service.resume(id);
-        return sendJson(res, 200, { id });
+        const { force } = await readJson(req);
+        if (force !== undefined && typeof force !== 'boolean') throw new HubError(400, 'force must be a boolean');
+        const resumed = service.resume(id, force);
+        return sendJson(res, 200, { id, ...(resumed.forced ? { forced: resumed.forced } : {}) });
       }
       if (action === 'archive') {
         const { archived } = await readJson(req);

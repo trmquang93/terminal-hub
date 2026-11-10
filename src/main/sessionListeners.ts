@@ -237,7 +237,7 @@ export class SessionListeners {
       return { status: 202, body: { handshakeId: pending[0]?.record.id ?? null, handshakeIds: pending.map((item) => item.record.id), expiresAt, state: 'pending' } };
     }
     const session = await this.settleAndCreate(pending, options);
-    return { status: 201, body: { id: session.id, listeners: pending.map((item) => ({ id: item.listener.id, handshakeId: item.record.id })) } };
+    return { status: 201, body: { id: session.id, listeners: pending.map((item) => ({ id: item.listener.id, handshakeId: item.record.id })), ...(session.forced ? { forced: session.forced } : {}) } };
   }
 
   /** POST /sessions/:id/listeners and `hub listen`: the listener is appended only after it acks. */

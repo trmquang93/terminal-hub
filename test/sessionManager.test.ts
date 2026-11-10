@@ -6,6 +6,7 @@ import { encodeCwd, isUuid } from '../src/main/claude';
 import { createApiServer, listenOnLoopback } from '../src/main/apiServer';
 import { SessionManager } from '../src/main/sessionManager';
 import { SessionStore } from '../src/main/sessionStore';
+import { HubError } from '../src/main/errors';
 import type { SessionInfo, SessionMeta } from '../src/shared/types';
 
 let base: string;
@@ -569,5 +570,98 @@ describe('SessionManager — human-created sessions', () => {
       await new Promise<void>((resolve) => void server.close(() => resolve()));
     }
     await exited(m, created.id);
+  });
+});
+
+describe('SessionManager — one session per git worktree', () => {
+  let logs: { message: string; level: string }[];
+  const guarded = (): SessionManager => {
+    logs = [];
+    return track(new SessionManager(new SessionStore(join(base, 'sessions')), 'test', { baseEnv: () => ({ PATH: `${bin}:/usr/bin:/bin` }), log: (message, level) => void logs.push({ message, level: level ?? 'INFO' }) }));
+  };
+  const repo = (name: string): string => {
+    const dir = join(base, name);
+    mkdirSync(join(dir, 'sub'), { recursive: true });
+    mkdirSync(join(dir, '.git'));
+    return dir;
+  };
+  const conflictOf = (fn: () => unknown): HubError => {
+    try {
+      fn();
+    } catch (error) {
+      if (error instanceof HubError) return error;
+    }
+    throw new Error('expected a HubError');
+  };
+
+  it('a second start in the same worktree is 409 and names the first session by id, title and cwd', () => {
+    const m = guarded();
+    const root = repo('wt-a');
+    const first = m.start({ cwd: root, command: 'sleep', args: ['30'], title: 'first one' });
+    const error = conflictOf(() => m.start({ cwd: join(root, 'sub'), command: 'sleep', args: ['30'] }));
+    expect(error.status).toBe(409);
+    expect(error.details).toEqual({ conflict: { id: first.id, title: 'first one', cwd: root } });
+    expect(error.message).toBe(`another session is already running in this worktree — id: ${first.id}, title: "first one", cwd: ${root}. Send the next message to it (hub send ${first.id} …) or pass --force to start anyway.`);
+    expect(error.message).not.toContain('\n');
+    // refused before anything was created: no meta, no listing
+    expect(m.list()).toHaveLength(1);
+    expect(readdirSync(join(base, 'sessions'))).toEqual([first.id]);
+  });
+
+  it('a different worktree, or a folder outside git, starts fine', () => {
+    const m = guarded();
+    m.start({ cwd: repo('wt-b'), command: 'sleep', args: ['30'] });
+    expect(() => m.start({ cwd: repo('wt-c'), command: 'sleep', args: ['30'] })).not.toThrow();
+    m.start({ cwd: work, command: 'sleep', args: ['30'] });
+    expect(() => m.start({ cwd: work, command: 'sleep', args: ['30'] })).not.toThrow();
+  });
+
+  it('a session that already exited holds nothing, so the worktree can be used again', async () => {
+    const m = guarded();
+    const root = repo('wt-d');
+    const first = m.start({ cwd: root, command: 'true' });
+    await exited(m, first.id);
+    expect(() => m.start({ cwd: root, command: 'sleep', args: ['30'] })).not.toThrow();
+  });
+
+  it('--force starts anyway, returns `forced` (not persisted, not on get/list) and logs a WARN', () => {
+    const m = guarded();
+    const root = repo('wt-e');
+    const first = m.start({ cwd: root, command: 'sleep', args: ['30'], title: 'holder' });
+    expect(first.forced).toBeUndefined();
+    const second = m.start({ cwd: root, command: 'sleep', args: ['30'], force: true });
+    expect(second.forced).toEqual({ id: first.id, title: 'holder', cwd: root });
+    expect(m.get(second.id)?.forced).toBeUndefined();
+    expect(m.list().every((item) => item.forced === undefined)).toBe(true);
+    expect(JSON.stringify(readMeta(second.id))).not.toContain('forced');
+    const warn = logs.filter((entry) => entry.level === 'WARN');
+    expect(warn).toHaveLength(1);
+    expect(warn[0]?.message).toContain(first.id);
+  });
+
+  it('resume is refused while another session runs in the worktree, and --force resumes with `forced`', async () => {
+    const m = guarded();
+    const root = repo('wt-f');
+    const first = m.start({ cwd: root, command: 'true' });
+    await exited(m, first.id);
+    const holder = m.start({ cwd: root, command: 'sleep', args: ['30'], title: 'holder' });
+    const error = conflictOf(() => m.resume(first.id));
+    expect(error.status).toBe(409);
+    expect(error.details).toEqual({ conflict: { id: holder.id, title: 'holder', cwd: root } });
+    expect(m.get(first.id)).toMatchObject({ state: 'exited', resumeCount: 0 });
+    const forced = m.resume(first.id, true);
+    expect(forced).toMatchObject({ id: first.id, running: true, resumeCount: 1, forced: { id: holder.id, title: 'holder', cwd: root } });
+    expect(logs.some((entry) => entry.level === 'WARN')).toBe(true);
+  });
+
+  it('resume of a session never counts itself, and a resume with nobody else running is unchanged', async () => {
+    const m = guarded();
+    const root = repo('wt-g');
+    const first = m.start({ cwd: root, command: 'true' });
+    await exited(m, first.id);
+    const resumed = m.resume(first.id);
+    expect(resumed.running).toBe(true);
+    expect(resumed.forced).toBeUndefined();
+    expect(logs.filter((entry) => entry.level === 'WARN')).toEqual([]);
   });
 });

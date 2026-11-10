@@ -253,9 +253,16 @@ that legacy endpoint until it is removed.
 ## HTTP API (127.0.0.1, `Authorization: Bearer <token>` except `/health`)
 
 `GET /health` (`ok`, `version`, `startedAt`, `pid`) · `GET /sessions[?attention=1]` (includes archived sessions; each has `archived`) · `POST /sessions` (no `listeners` or `listeners: []` creates at once with zero listeners; otherwise 201 after the handshake, 202 with `wait:false`) · `POST /sessions/:id/listeners` · `GET|DELETE /sessions/:id/listeners[/:listenerId]` · `POST /handshakes/:id/ack` · `GET /handshakes/:id` · `GET /sessions/:id/events?since&limit` · `GET /sessions/:id/deliveries?listener&limit` · `GET /sessions/:id` · `GET …/output?offset&limit` · `GET …/text?offset` ·
-`GET …/stream` (SSE, live output only) · `GET /events` (SSE: attention + turn + exit) · `POST …/input` · `POST …/answer` · `POST …/resize` `{ "cols": 1..1000, "rows": 1..1000 }` (400 otherwise, 409 when not running) · `POST …/stop` · `POST …/resume` ·
+`GET …/stream` (SSE, live output only) · `GET /events` (SSE: attention + turn + exit) · `POST …/input` · `POST …/answer` · `POST …/resize` `{ "cols": 1..1000, "rows": 1..1000 }` (400 otherwise, 409 when not running) · `POST …/stop` · `POST …/resume` (optional body `{ "force": true }`) ·
 `POST …/title` `{ "title": "…" }` pins, `{ "auto": true }` unpins · `POST …/archive` `{ "archived": true|false }` (returns the session; 400 while it runs) · `DELETE /sessions/:id` ·
 `POST /sessions/delete` `{ "ids": [...] }` (no confirmation; kills running ones; 404 and nothing deleted if an id is unknown) · `POST /sessions/delete-all` → `{ "ok": true, "deleted": N }` (no confirmation, kills running ones) · `POST /hooks/claude`
+
+**One running session per git worktree.** `POST /sessions` and `POST /sessions/:id/resume` answer 409 when a session is already
+running in the same git worktree (the nearest folder holding a `.git` file or directory, after resolving symlinks; linked worktrees
+of one repo are separate worktrees; a folder outside git is never blocked). Only running sessions count. The body is
+`{ "error": "another session is already running in this worktree — id: …, title: \"…\", cwd: …. Send the next message to it (hub send <id> …) or pass --force to start anyway.", "conflict": { "id", "title", "cwd" } }`.
+`"force": true` (on `POST /sessions`, or in the body of `POST …/resume`) starts anyway: the answer then carries `forced` (the session
+that was already there), and a WARN line goes to `notify.log`. `forced` is never stored and never appears on `GET /sessions`.
 
 **History endpoints.** For a shell session `…/output` is the raw `output.log` bytes and `…/text` the same log with ANSI stripped.
 For a Claude Code or OpenCode session (no `output.log`) both serve the agent's transcript, rendered as plain UTF-8 text with
@@ -268,13 +275,13 @@ transcript for agent sessions); `hub text <id> --follow` follows `…/stream`.
 ## CLI
 
 ```
-hub run [--cwd DIR] [--title T] [--unattended] [-q] [--json] -- CMD ARGS…   exits with the child's code
+hub run [--cwd DIR] [--title T] [--unattended] [--force] [-q] [--json] -- CMD ARGS…   exits with the child's code
 hub run --detach [--json] -- CMD ARGS…    print the id, exit 0, never follow the output
 hub run --wait [--timeout S] -- CMD ARGS… start detached, then block like hub wait
 hub ls [--json]                 marks archived sessions in an ARCHIVED column
 hub show <id> [--json]          full id, state, running, exitCode, cwd, command, title, archived, resumable, attention, turn
 hub status [--json]             version, pid, startedAt, baseUrl, data dir, total / running / waiting (exit 2 when the hub is down)
-hub text <id> [--follow] | send <id> "text" | stop <id> | rm <id> | resume <id> [--follow]
+hub text <id> [--follow] | send <id> "text" | stop <id> | rm <id> | resume <id> [--follow] [--force]
 hub resize <id> --cols N --rows N              (1..1000)
 hub rm-all --yes                delete every session and its files (kills running ones); refuses without --yes
 hub archive <id> | unarchive <id>
@@ -293,4 +300,5 @@ hub --help                      commands, flags, exit codes and the data dir (al
 ```
 
 `--json` (ls, show, status, run, wait, listen, ack, listeners, events, deliveries): stdout is exactly one JSON value; a failure prints `{"error":"…","code":N}` to stderr and exits
-with the same code as the human path. `hub status` counts a running session as *waiting* when its attention is set or its turn is `waiting`.
+with the same code as the human path (a worktree 409 adds `"conflict":{"id","title","cwd"}`; exit 1). `hub run` / `hub resume` refuse to start a second session in a git worktree that already has a running one;
+`--force` starts anyway, prints `warning: started a second session in the same worktree (already running: <id> "<title>")` on stderr and adds `forced` to the `--json` output. `hub status` counts a running session as *waiting* when its attention is set or its turn is `waiting`.

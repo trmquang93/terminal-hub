@@ -194,7 +194,7 @@ async function startServices(): Promise<void> {
   manager = new SessionManager(new SessionStore(join(dir, 'sessions')), app.getVersion(), {
     baseEnv,
     hooksFile,
-    log: (message) => notifyLog.write('INFO', message),
+    log: (message, level) => notifyLog.write(level ?? 'INFO', message),
     listenerInfo: (id) => listeners?.list(id) ?? [],
   });
   listeners = new SessionListeners({

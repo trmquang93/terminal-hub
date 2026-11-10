@@ -11,7 +11,8 @@ declare const HUB_PACKAGED: boolean | undefined;
 const startHint = typeof HUB_PACKAGED !== 'undefined' && HUB_PACKAGED ? "open -a 'Terminal Hub'" : `cd ${resolve(__dirname, '..', '..')} && npm start`;
 
 const USAGE = `usage:
-  hub run [--cwd DIR] [--title T] [--unattended] [-q] [--json] -- CMD ARGS…   start a session, follow it, exit with its exit code
+  hub run [--cwd DIR] [--title T] [--unattended] [--force] [-q] [--json] -- CMD ARGS…   start a session, follow it, exit with its exit code
+                                                      (refused with 409 when another session is running in the same git worktree; --force starts anyway)
   hub run --detach [--json] -- CMD ARGS…              start the session, print its id, exit 0 (never follows the output)
   hub run --wait [--timeout S] [--json] -- CMD ARGS…  start detached, then block like hub wait
   hub run … --listen SPEC | --listen-file PATH        listeners are optional; every given one must ack before the session exists
@@ -32,7 +33,7 @@ const USAGE = `usage:
   hub send <id> "text" [--no-enter]                   type into a session (Enter appended by default)
   hub resize <id> --cols N --rows N [--json]          resize the terminal of a running session (1..1000)
   hub stop <id>                                       SIGTERM, SIGKILL after 3 s
-  hub resume <id> [--follow]                          resume (Claude Code) or restart (other commands)
+  hub resume <id> [--follow] [--force]                resume (Claude Code) or restart (other commands); --force as for run
   hub archive <id>                                    move a finished session to the Archived list (refused while it runs)
   hub unarchive <id>                                  move it back
   hub rename <id> <title>                             set the title and pin it (the program's terminal-title escapes no longer change it)
@@ -85,6 +86,8 @@ class CliError extends Error {
   constructor(
     message: string,
     readonly code = 1,
+    /** Extra fields of the API's error body worth keeping, e.g. `conflict` of a 409. */
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
   }
@@ -122,8 +125,8 @@ async function call(api: Api, path: string, init: { method?: string; body?: unkn
     throw notRunning();
   }
   if (!response.ok) {
-    const payload = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new CliError(`error ${response.status}: ${payload.error ?? response.statusText}`);
+    const payload = (await response.json().catch(() => ({}))) as { error?: string; conflict?: unknown };
+    throw new CliError(`error ${response.status}: ${payload.error ?? response.statusText}`, 1, payload.conflict === undefined ? undefined : { conflict: payload.conflict });
   }
   return response;
 }
@@ -218,13 +221,14 @@ async function wait(api: Api, id: string, timeoutSeconds: number | null): Promis
 }
 
 /** Prints the outcome of `wait` (one JSON value with --json) and returns the exit code. */
-function reportWait(id: string, outcome: WaitOutcome): number {
+function reportWait(id: string, outcome: WaitOutcome, forced?: { id: string; title: string; cwd: string }): number {
+  const extra = forced ? { forced } : {};
   if (outcome.kind === 'attention') {
-    if (jsonMode) printJson({ id, status: 'attention', attention: outcome.attention, code: ATTENTION_EXIT_CODE });
+    if (jsonMode) printJson({ id, status: 'attention', attention: outcome.attention, code: ATTENTION_EXIT_CODE, ...extra });
     else console.log(describeAttention({ attention: outcome.attention }));
     return ATTENTION_EXIT_CODE;
   }
-  if (jsonMode) printJson({ id, status: 'exited', exitCode: outcome.code, signal: outcome.signal, code: outcome.code });
+  if (jsonMode) printJson({ id, status: 'exited', exitCode: outcome.code, signal: outcome.signal, code: outcome.code, ...extra });
   return outcome.code;
 }
 
@@ -391,26 +395,34 @@ function pad(value: string, width: number): string {
   return value.length >= width ? value : value + ' '.repeat(width - value.length);
 }
 
+type Forced = { id: string; title: string; cwd: string };
+
+/** stderr note that `--force` went past the worktree guard; stdout stays the id / JSON. */
+function warnForced(forced: Forced | undefined): void {
+  if (forced) console.error(`warning: started a second session in the same worktree (already running: ${forced.id} "${forced.title}")`);
+}
+
 async function run(api: Api, args: string[]): Promise<number> {
   const separator = args.indexOf('--');
   if (separator < 0 || separator === args.length - 1) throw new CliError(`hub run needs a command after --\n\n${USAGE}`);
-  const { flags, repeated } = parseFlags(args.slice(0, separator), ['--cwd', '--title', '--timeout'], ['-q', '--quiet', '--unattended', '--json', '--detach', '--wait'], ['--listen', '--listen-file']);
+  const { flags, repeated } = parseFlags(args.slice(0, separator), ['--cwd', '--title', '--timeout'], ['-q', '--quiet', '--unattended', '--json', '--detach', '--wait', '--force'], ['--listen', '--listen-file']);
   const timeout = parseTimeout(flags);
   const listeners = collectListeners(flags, repeated);
   const [command = '', ...commandArgs] = args.slice(separator + 1);
-  const { id } = await json<{ id: string }>(api, '/sessions', {
+  const { id, forced } = await json<{ id: string; forced?: Forced }>(api, '/sessions', {
     method: 'POST',
-    body: { cwd: resolve(String(flags.get('--cwd') ?? process.cwd())), command, args: commandArgs, title: flags.get('--title'), unattended: flags.has('--unattended') || undefined, listeners },
+    body: { cwd: resolve(String(flags.get('--cwd') ?? process.cwd())), command, args: commandArgs, title: flags.get('--title'), unattended: flags.has('--unattended') || undefined, force: flags.has('--force') || undefined, listeners },
   });
+  warnForced(forced);
   if (!jsonMode) console.log(id);
-  if (flags.has('--wait')) return reportWait(id, await wait(api, id, timeout));
+  if (flags.has('--wait')) return reportWait(id, await wait(api, id, timeout), forced);
   if (flags.has('--detach')) {
-    if (jsonMode) printJson({ id });
+    if (jsonMode) printJson({ id, ...(forced ? { forced } : {}) });
     return 0;
   }
   const quiet = jsonMode || flags.has('-q') || flags.has('--quiet');
   const exit = await follow(api, id, (text) => (quiet ? undefined : void process.stdout.write(text)));
-  if (jsonMode) printJson({ id, exitCode: exit.exitCode, signal: exit.signal, code: exitCodeOf(exit) });
+  if (jsonMode) printJson({ id, exitCode: exit.exitCode, signal: exit.signal, code: exitCodeOf(exit), ...(forced ? { forced } : {}) });
   return exitCodeOf(exit);
 }
 
@@ -602,12 +614,13 @@ async function main(argv: string[]): Promise<number> {
     case 'stop':
     case 'rm':
     case 'resume': {
-      const { flags, rest } = parseFlags(args, [], command === 'resume' ? ['--follow', '-f'] : []);
+      const { flags, rest } = parseFlags(args, [], command === 'resume' ? ['--follow', '-f', '--force'] : []);
       const id = await resolveId(api, rest[0]);
       if (command === 'stop') await call(api, `/sessions/${id}/stop`, { method: 'POST' });
       else if (command === 'rm') await call(api, `/sessions/${id}`, { method: 'DELETE' });
       else {
-        await call(api, `/sessions/${id}/resume`, { method: 'POST' });
+        const resumed = (await (await call(api, `/sessions/${id}/resume`, { method: 'POST', body: flags.has('--force') ? { force: true } : undefined })).json().catch(() => ({}))) as { forced?: Forced };
+        warnForced(resumed.forced);
         console.log(id);
         if (flags.has('--follow') || flags.has('-f')) return exitCodeOf(await follow(api, id, (text) => void process.stdout.write(text)));
       }
@@ -702,7 +715,7 @@ main(process.argv.slice(2)).then(
   (code) => process.exit(code),
   (error: unknown) => {
     const code = error instanceof CliError ? error.code : 1;
-    if (jsonMode) console.error(JSON.stringify({ error: (error instanceof Error ? error.message : String(error)).split('\n\nusage:')[0], code }));
+    if (jsonMode) console.error(JSON.stringify({ error: (error instanceof Error ? error.message : String(error)).split('\n\nusage:')[0], code, ...(error instanceof CliError ? error.details : {}) }));
     else console.error(error instanceof CliError ? error.message : error);
     process.exit(code);
   },
