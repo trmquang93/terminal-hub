@@ -255,6 +255,12 @@ export interface UpdaterStatus {
   message: string;
 }
 
+export interface OpenPathResult {
+  ok: boolean;
+  /** "missing" when nothing exists at the path; otherwise the OS error. */
+  reason?: string;
+}
+
 export interface HubApi {
   defaults(): Promise<HubDefaults>;
   /** Git top-level (nearest ancestor with a `.git` entry) per cwd; null when the cwd is outside a repo. */
@@ -275,6 +281,8 @@ export interface HubApi {
   pickFolder(): Promise<string | null>;
   /** Opens an http(s) URL in the default browser; false when main refuses the URL. */
   openExternal(url: string): Promise<boolean>;
+  /** Opens a file or folder from terminal text, resolved against cwd. A file with a line opens in VS Code or Cursor at that line when installed. */
+  openPath(path: string, cwd: string, line?: number, col?: number): Promise<OpenPathResult>;
   onSessionChanged(callback: (session: SessionInfo) => void): () => void;
   onSessionRemoved(callback: (id: string) => void): () => void;
   onOutput(callback: (event: OutputEvent) => void): () => void;

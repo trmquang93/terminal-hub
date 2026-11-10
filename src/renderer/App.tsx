@@ -593,7 +593,7 @@ export function App() {
             </header>
             <AttentionPanel session={selected} />
             <Banner session={selected} />
-            <TerminalView key={selected.id} id={selected.id} ended={!selected.running} />
+            <TerminalView key={selected.id} id={selected.id} cwd={selected.cwd} ended={!selected.running} />
           </>
         ) : (
           <div className="placeholder">Select a session or press ⌘T to start a new one.</div>
