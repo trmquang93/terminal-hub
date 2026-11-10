@@ -65,7 +65,7 @@ const PATH_CANDIDATE = /(?<!\w)"([^"\n]+)"|(?<!\w)'([^'\n]+)'|(?:\\ |[^\s\\"'`<>
 const PATH_TRAILING = /[.,;:!?)\]}]$/;
 const PATH_LEADING = /^[([{]+/;
 const LINE_SUFFIX = /^(.+?):(\d+)(?::(\d+))?$/;
-const BARE_FIRST_SEGMENT = /^[\w@.+]+$/;
+const BARE_FIRST_SEGMENT = /^[\w@.+-]+$/;
 
 function looksLikePath(path: string): boolean {
   if (path.startsWith('-') || path.includes('://') || !/[^/]/.test(path)) return false;
