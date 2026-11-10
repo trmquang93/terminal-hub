@@ -1,8 +1,11 @@
+import { spawn } from 'node:child_process';
 import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, shell } from 'electron';
-import { join } from 'node:path';
+import { accessSync, constants, statSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { join, resolve as resolvePath } from 'node:path';
 import type { Server } from 'node:http';
 import { safeExternalUrl } from '../shared/links';
-import type { AnswerRequest, HubDefaults, MenuAction, StartSessionOptions } from '../shared/types';
+import type { AnswerRequest, HubDefaults, MenuAction, OpenPathResult, StartSessionOptions } from '../shared/types';
 import { createApiServer, listenOnLoopback } from './apiServer';
 import { loadOrCreateToken, removeApiFile, writeApiFile } from './apiFile';
 import { NotificationThrottle } from './attention';
@@ -35,6 +38,8 @@ let updater: Updater | null = null;
 let apiServer: Server | null = null;
 let apiBaseUrl: string | null = null;
 let quitting = false;
+/** PATH of the user's login shell, set in startServices; used to find `code` and `cursor`. */
+let searchPath = process.env.PATH ?? '';
 const startedAt = new Date().toISOString();
 
 function defaultShell(): string {
@@ -43,6 +48,70 @@ function defaultShell(): string {
 
 function send(channel: string, payload: unknown): void {
   if (window && !window.isDestroyed()) window.webContents.send(channel, payload);
+}
+
+function findOnPath(command: string): string | null {
+  for (const dir of searchPath.split(':')) {
+    if (!dir) continue;
+    const candidate = join(dir, command);
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      // not in this directory
+    }
+  }
+  return null;
+}
+
+/** How long an editor may run before it counts as started; one that exits non-zero sooner (a broken shim) counts as failed. */
+const EDITOR_CHECK_MS = 3000;
+
+/** Starts a detached program with an argv array (never a shell string). True when it exits 0 or is still running after EDITOR_CHECK_MS; false when it cannot start or exits non-zero first. */
+function launch(file: string, args: string[]): Promise<boolean> {
+  return new Promise((done) => {
+    const child = spawn(file, args, { detached: true, stdio: 'ignore', env: { ...process.env, PATH: searchPath } });
+    let settled = false;
+    const finish = (ok: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (ok) child.unref();
+      done(ok);
+    };
+    const timer = setTimeout(() => finish(true), EDITOR_CHECK_MS);
+    child.once('error', () => finish(false));
+    child.once('exit', (code) => finish(code === 0));
+  });
+}
+
+function positive(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value < 1e9 ? value : undefined;
+}
+
+async function openLocalPath(raw: unknown, cwd: unknown, lineArg: unknown, colArg: unknown): Promise<OpenPathResult> {
+  if (typeof raw !== 'string' || typeof cwd !== 'string' || raw === '' || raw.includes('\0') || cwd.includes('\0')) return { ok: false, reason: 'invalid' };
+  const home = app.getPath('home');
+  const expanded = raw === '~' ? home : raw.startsWith('~/') ? join(home, raw.slice(2)) : raw;
+  const target = resolvePath(cwd || home, expanded);
+  const info = await stat(target).catch(() => null);
+  if (!info) return { ok: false, reason: 'missing' };
+  const system = async (): Promise<OpenPathResult> => {
+    const error = await shell.openPath(target);
+    return error === '' ? { ok: true } : { ok: false, reason: error };
+  };
+  const line = positive(lineArg);
+  if (info.isDirectory() || line === undefined) return system();
+  const col = positive(colArg);
+  const location = col === undefined ? `${target}:${line}` : `${target}:${line}:${col}`;
+  for (const editor of ['code', 'cursor']) {
+    const binary = findOnPath(editor);
+    if (binary && (await launch(binary, ['-g', location]))) return { ok: true };
+  }
+  const [editor, ...editorArgs] = (process.env.EDITOR ?? '').trim().split(/\s+/).filter(Boolean);
+  const binary = editor && (editor.includes('/') ? editor : findOnPath(editor));
+  if (binary && (await launch(binary, [...editorArgs, `+${line}`, target]))) return { ok: true };
+  return system();
 }
 
 function recentFolders(): string[] {
@@ -117,6 +186,7 @@ function registerIpc(): void {
     await shell.openExternal(safe);
     return true;
   });
+  ipcMain.handle('hub:openPath', (_event, path: unknown, cwd: unknown, line: unknown, col: unknown) => openLocalPath(path, cwd, line, col));
   manager.onOutput(({ id, endOffset, data }) => send('hub:output', { id, endOffset, data }));
   manager.onChanged((session) => send('hub:changed', session));
   manager.onRemoved((id) => send('hub:removed', id));
@@ -184,6 +254,7 @@ function createWindow(): void {
 async function startServices(): Promise<void> {
   const loginPath = await loginShellPath(defaultShell());
   const baseEnv = (): NodeJS.ProcessEnv => ({ ...process.env, PATH: [loginPath, process.env.PATH].filter(Boolean).join(':') });
+  searchPath = baseEnv().PATH ?? '';
   const notifyLog = new NotifyLog(dir);
   const hooksFile = createHookRefresher(
     dir,
