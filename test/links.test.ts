@@ -76,6 +76,11 @@ describe('linkifyText', () => {
     expect(only('(see src/a.ts:12).')).toMatchObject({ target: 'src/a.ts', line: 12, end: 16 });
   });
 
+  it('links a bare relative path whose first folder has a hyphen', () => {
+    expect(only('terminal-hub/src/main.ts:12')).toEqual({ start: 0, end: 27, kind: 'path', target: 'terminal-hub/src/main.ts', line: 12 });
+    expect(only('see some-dir/file.ts')).toMatchObject({ start: 4, target: 'some-dir/file.ts' });
+  });
+
   it('does not treat a flag or an assignment as a path', () => {
     expect(linkifyText('--file=/x')).toEqual([]);
     expect(linkifyText('-/x')).toEqual([]);
