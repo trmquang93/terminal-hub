@@ -182,8 +182,8 @@ Per-session `autoAnswer` policy (off by default; `unattended: true` = approve `D
 ## Session events: per-session listeners
 
 A session event is delivered **only** to listeners registered on that session. **No listener means no event**, and a
-session created through `POST /sessions` or `hub run` with no listener is not created at all. The design is in
-`docs/agent-events.md`.
+session created through `POST /sessions` or `hub run` with no listener starts at once with zero listeners, like a
+session from the window; it receives no events. The design is in `docs/agent-events.md`.
 
 Three kinds of listener:
 
@@ -194,8 +194,8 @@ Three kinds of listener:
 ```
 
 `events` defaults to `attention, resolved, turn, exit`. `http` gets each event as a JSON POST (`bearer` becomes
-`Authorization: Bearer …`). `command` is spawned with `shell: false`, gets one JSON line on stdin and exit 0 means delivered;
-it may also acknowledge a handshake by printing `{"ack":"<token>"}` as its first stdout line. `openmausbot` spools the event
+`Authorization: Bearer …`). `command` is spawned with `shell: false`, gets one JSON line on stdin and exit 0 means delivered and
+acknowledges the create handshake; printing `{"ack":"<token>"}` on stdout is accepted too (a wrong token is refused, and exit 0 does not rescue it). `openmausbot` spools the event
 under `<data dir>/outbox/openmausbot/<botId>/<threadId>/` and runs the bridge command from `<data dir>/omb-bridge.json`
 (`{"command":[…],"timeoutMs":5000}`); without that file an `openmausbot` listener is a 400 at create time.
 
@@ -252,7 +252,7 @@ that legacy endpoint until it is removed.
 
 ## HTTP API (127.0.0.1, `Authorization: Bearer <token>` except `/health`)
 
-`GET /health` (`ok`, `version`, `startedAt`, `pid`) · `GET /sessions[?attention=1]` (includes archived sessions; each has `archived`) · `POST /sessions` (requires `listeners`; 201 after the handshake, 202 with `wait:false`) · `POST /sessions/:id/listeners` · `GET|DELETE /sessions/:id/listeners[/:listenerId]` · `POST /handshakes/:id/ack` · `GET /handshakes/:id` · `GET /sessions/:id/events?since&limit` · `GET /sessions/:id/deliveries?listener&limit` · `GET /sessions/:id` · `GET …/output?offset&limit` · `GET …/text?offset` ·
+`GET /health` (`ok`, `version`, `startedAt`, `pid`) · `GET /sessions[?attention=1]` (includes archived sessions; each has `archived`) · `POST /sessions` (no `listeners` or `listeners: []` creates at once with zero listeners; otherwise 201 after the handshake, 202 with `wait:false`) · `POST /sessions/:id/listeners` · `GET|DELETE /sessions/:id/listeners[/:listenerId]` · `POST /handshakes/:id/ack` · `GET /handshakes/:id` · `GET /sessions/:id/events?since&limit` · `GET /sessions/:id/deliveries?listener&limit` · `GET /sessions/:id` · `GET …/output?offset&limit` · `GET …/text?offset` ·
 `GET …/stream` (SSE, live output only) · `GET /events` (SSE: attention + turn + exit) · `POST …/input` · `POST …/answer` · `POST …/resize` `{ "cols": 1..1000, "rows": 1..1000 }` (400 otherwise, 409 when not running) · `POST …/stop` · `POST …/resume` ·
 `POST …/title` `{ "title": "…" }` pins, `{ "auto": true }` unpins · `POST …/archive` `{ "archived": true|false }` (returns the session; 400 while it runs) · `DELETE /sessions/:id` ·
 `POST /sessions/delete` `{ "ids": [...] }` (no confirmation; kills running ones; 404 and nothing deleted if an id is unknown) · `POST /sessions/delete-all` → `{ "ok": true, "deleted": N }` (no confirmation, kills running ones) · `POST /hooks/claude`
@@ -282,7 +282,7 @@ hub rename <id> <title> | rename <id> --auto   pin a title / let the program's t
 hub wait <id> [--timeout S] [--json]   exit 10 on attention (prints the question), child's code on exit, 124 on timeout
 hub answer <id> yes|no|enter|esc|tab|up|down|1-9|<text>
 hub watch                       stream attention / turn / exit events as JSON lines (Ctrl-C exits 0)
-hub run … --listen SPEC [--listen-file PATH]   listeners are required; all must ack before the session exists
+hub run … --listen SPEC [--listen-file PATH]   listeners are optional; every given one must ack before the session exists
 hub listen <id> --listen SPEC [--no-wait]      add a listener to a running session (same handshake)
 hub ack <handshake-id> <token>                 acknowledge a pending listener handshake
 hub listeners <id> [--json] | listeners rm <id> <listener> | listeners resume <id> <listener>

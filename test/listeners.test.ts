@@ -67,7 +67,8 @@ function httpFetch(ack: boolean): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
-function commandSpawn(): typeof spawnType {
+/** printed: what the fake hook writes to stdout; 'token' prints the real ack line. */
+function commandSpawn(printed: 'token' | 'nothing' | 'wrong-token' = 'token', exitCode = 0): typeof spawnType {
   return ((_file: string, _args: string[]) => {
     const child = new EventEmitter() as unknown as {
       stdin: { end: (input: string) => void };
@@ -82,8 +83,9 @@ function commandSpawn(): typeof spawnType {
       end: (input: string) => {
         const payload = JSON.parse(input) as { token?: string };
         setImmediate(() => {
-          if (payload.token) child.stdout.emit('data', Buffer.from(`${JSON.stringify({ ack: payload.token })}\n`));
-          (child as unknown as EventEmitter).emit('close', 0, null);
+          if (printed === 'token' && payload.token) child.stdout.emit('data', Buffer.from(`${JSON.stringify({ ack: payload.token })}\n`));
+          if (printed === 'wrong-token') child.stdout.emit('data', Buffer.from(`${JSON.stringify({ ack: 'not-the-token' })}\n`));
+          (child as unknown as EventEmitter).emit('close', exitCode, null);
         });
       },
     };
@@ -197,6 +199,44 @@ describe('create handshake', () => {
     expect(starts).toHaveLength(1);
   });
 
+  function commandHub(spawnImpl: typeof spawnType): SessionListeners {
+    return new SessionListeners({
+      dataDir: join(dataDir, DATA),
+      sessionsRoot,
+      startSession: (options) => {
+        starts.push(options);
+        const session = info('33333333-3333-4333-8333-333333333333');
+        sessions.set(session.id, session);
+        mkdirSync(join(sessionsRoot, session.id), { recursive: true });
+        return session;
+      },
+      getSession: (id) => sessions.get(id),
+      fetchImpl: httpFetch(true),
+      spawnImpl,
+      sleep: () => Promise.resolve(),
+      apiBaseUrl: () => 'http://127.0.0.1:9999',
+    });
+  }
+  const commandListener = { kind: 'command', command: { argv: ['/usr/bin/true'] } };
+
+  it('accepts a command listener that exits 0 without printing an ack', async () => {
+    const result = await commandHub(commandSpawn('nothing', 0)).create({ cwd: '/tmp', command: 'sh' }, [{ ...commandListener, ackTimeoutSec: 1 }]);
+    expect(result.status).toBe(201);
+    expect(starts).toHaveLength(1);
+  });
+
+  it('refuses a command listener that exits non-zero and leaves no session folder', async () => {
+    await expect(commandHub(commandSpawn('nothing', 1)).create({ cwd: '/tmp', command: 'sh' }, [{ ...commandListener, ackTimeoutSec: 1 }])).rejects.toMatchObject({ status: 504 });
+    expect(starts).toHaveLength(0);
+    expect(existsSync(sessionsRoot)).toBe(false);
+  });
+
+  it('does not let exit 0 rescue a wrong ack token', async () => {
+    await expect(commandHub(commandSpawn('wrong-token', 0)).create({ cwd: '/tmp', command: 'sh' }, [{ ...commandListener, ackTimeoutSec: 1 }])).rejects.toMatchObject({ status: 504 });
+    expect(starts).toHaveLength(0);
+    expect(existsSync(sessionsRoot)).toBe(false);
+  });
+
   it('adds a listener to a running session through the same handshake', async () => {
     const session = seedSession();
     const result = await hub.addListener(session.id, httpListener);
@@ -249,7 +289,7 @@ describe('event journal and delivery from the hub', () => {
 
 describe('HubError carries details for the API body', () => {
   it('keeps the handshake list on a 504', () => {
-    const error = new HubError(504, 'listener did not acknowledge', { handshakes: [{ id: 'hs_1', state: 'expired' }] });
+    const error = new HubError(504, 'listener did not acknowledge (a cmd: listener must exit 0 or print {"ack":"<token>"})', { handshakes: [{ id: 'hs_1', state: 'expired' }] });
     expect(error.status).toBe(504);
     expect(error.details).toEqual({ handshakes: [{ id: 'hs_1', state: 'expired' }] });
   });

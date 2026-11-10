@@ -359,9 +359,10 @@ describe('API routes', () => {
 
   it('validates POST /sessions and maps unknown ids to 404', async () => {
     expect((await request('/sessions', { method: 'POST', headers: auth, body: '{"cwd":"rel","command":"ls"}' })).status).toBe(400);
-    // A session cannot be created through the API without at least one listener, even when the rest is valid.
-    expect((await request('/sessions', { method: 'POST', headers: auth, body: '{"cwd":"/tmp","command":"ls"}' })).status).toBe(400);
-    expect((await request('/sessions', { method: 'POST', headers: auth, body: '{"cwd":"/tmp","command":"ls","listeners":[]}' })).status).toBe(400);
+    // No listeners is a valid create: the session starts at once with zero listeners, like the window path.
+    expect(JSON.parse((await request('/sessions', { method: 'POST', headers: auth, body: '{"cwd":"/tmp","command":"ls"}' })).body)).toEqual({ id: RUNNING, listeners: [] });
+    expect(JSON.parse((await request('/sessions', { method: 'POST', headers: auth, body: '{"cwd":"/tmp","command":"ls","listeners":[]}' })).body)).toEqual({ id: RUNNING, listeners: [] });
+    expect((await request('/sessions', { method: 'POST', headers: auth, body: '{"cwd":"/tmp","command":"ls","listeners":"nope"}' })).status).toBe(400);
     expect((await request('/sessions/33333333-3333-4333-8333-333333333333', { headers: auth })).status).toBe(404);
   });
 

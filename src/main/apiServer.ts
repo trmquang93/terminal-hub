@@ -19,7 +19,7 @@ export interface ApiOptions {
   token: string;
   version: string;
   startedAt: string;
-  /** Per-session listeners and their handshakes. Without it POST /sessions rejects every create (no listener means no session). */
+  /** Per-session listeners and their handshakes. Without it POST /sessions can still create a session with no listeners. */
   listeners?: SessionListeners;
 }
 
@@ -262,9 +262,14 @@ export function createApiServer(options: ApiOptions): Server {
         const body = await readJson(req);
         const start = parseStartOptions(body);
         if (body.wait !== undefined && typeof body.wait !== 'boolean') throw new HubError(400, 'wait must be a boolean');
-        if (!Array.isArray(body.listeners) || body.listeners.length === 0) throw new HubError(400, 'listeners is required and must not be empty');
-        if (!options.listeners) throw new HubError(400, 'this hub has no listener service; a session cannot be created without listeners');
-        const result = await options.listeners.create({ ...start, wait: body.wait !== false }, body.listeners);
+        if (body.listeners !== undefined && !Array.isArray(body.listeners)) throw new HubError(400, 'listeners must be an array');
+        const listeners = body.listeners ?? [];
+        if (listeners.length === 0) {
+          const session = service.start(start);
+          return sendJson(res, 201, { id: session.id, listeners: [] });
+        }
+        if (!options.listeners) throw new HubError(400, 'this hub has no listener service; a session with listeners cannot be created');
+        const result = await options.listeners.create({ ...start, wait: body.wait !== false }, listeners);
         return sendJson(res, result.status, result.body);
       }
       throw new HubError(404, 'not found');

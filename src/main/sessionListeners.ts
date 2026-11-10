@@ -48,8 +48,10 @@ function sessionDirOf(root: string, id: string): string {
   return join(root, id);
 }
 
+const ACK_TIMEOUT_MESSAGE = 'listener did not acknowledge (a cmd: listener must exit 0 or print {"ack":"<token>"})';
+
 /**
- * Owns the per-session listeners: the mandatory create/listen handshake, redacted persistence,
+ * Owns the per-session listeners: the create/listen handshake, redacted persistence,
  * the event journal and the delivery dispatcher. Every event is delivered only to listeners
  * registered on that session; no listener means no event.
  */
@@ -307,7 +309,7 @@ export class SessionListeners {
       const handshakes = pending.map((item) => handshakeInfo(readHandshake(this.options.dataDir, item.record.id) ?? item.record));
       this.cancelAll(pending);
       if (error instanceof HubError && error.status === 504) throw new HubError(504, error.message, { handshakes });
-      throw new HubError(504, 'listener did not acknowledge', { handshakes });
+      throw new HubError(504, ACK_TIMEOUT_MESSAGE, { handshakes });
     }
   }
 
@@ -321,7 +323,7 @@ export class SessionListeners {
     });
     const item: Pending = { record, token, listener, created: record.createdAt, done, resolve, reject, timer: null };
     this.pending.set(record.id, item);
-    item.timer = setTimeout(() => this.expire(item, 'expired', 'listener did not acknowledge'), record.ackTimeoutSec * 1000);
+    item.timer = setTimeout(() => this.expire(item, 'expired', ACK_TIMEOUT_MESSAGE), record.ackTimeoutSec * 1000);
     void this.sendTest(item, sessionId).catch((error: unknown) => {
       this.expire(item, 'failed', `test event could not be delivered: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -446,6 +448,7 @@ export class SessionListeners {
     }
     if (listener.kind === 'command' && listener.command) {
       let acked = false;
+      let wrongAck = false;
       const result = await runCommand(listener.command.argv, listener.command.cwd ?? (sessionId === undefined ? item.record.sessionRequest?.cwd : this.options.getSession(sessionId)?.cwd) ?? process.cwd(), `${payload}\n`, listener.command.timeoutMs ?? 5000, this.options.spawnImpl, (line) => {
         if (acked) return;
         try {
@@ -453,6 +456,8 @@ export class SessionListeners {
           if (parsed.ack === item.token) {
             acked = true;
             this.ack(item.record.id, item.token);
+          } else if (parsed.ack !== undefined) {
+            wrongAck = true;
           }
         } catch {
           // not the ack line
@@ -461,7 +466,12 @@ export class SessionListeners {
       if (acked) return { ok: true, retryable: false };
       if (result.spawnError) return { ok: false, retryable: true, error: result.spawnError };
       if (result.timedOut) return { ok: false, retryable: true, error: 'timeout' };
-      if (result.code === 0) return { ok: true, retryable: false };
+      if (result.code === 0 && !wrongAck) {
+        // exit 0 means delivered, same as for real events; it settles a handshake that no printed ack has.
+        if (this.isPending(item)) this.ack(item.record.id, item.token);
+        return { ok: true, retryable: false };
+      }
+      if (result.code === 0) return { ok: false, retryable: false, error: 'the command printed an ack with the wrong token' };
       return { ok: false, retryable: true, error: `exit ${result.code ?? result.signal ?? '?'}` };
     }
     if (listener.kind === 'openmausbot' && listener.openmausbot) {

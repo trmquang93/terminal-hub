@@ -14,12 +14,12 @@ config. OpenMausBot bot threads are also not addressable at all.
 
 - A session event is delivered **only** to listeners registered on that session.
 - **No listener means no event.**
-- A session created through the agent surface with **no registered listener is not created.**
+- A create with **no listener** is a valid session with zero listeners; it receives no events.
 
-The first two are absolute. The third applies to sessions created **programmatically by an
-agent**: `POST /sessions` and `hub run` reject an empty `listeners` array. A session a person
-creates by hand in the desktop window is allowed with an empty listener list, which is a valid
-state, not an error; the person can attach listeners to it later through the same handshake.
+The first two are absolute. A create with a missing or empty `listeners` array — the desktop
+window's New Session path, `POST /sessions` or `hub run` — starts immediately with zero listeners,
+a valid state and not an error; the caller (or a person) can attach listeners later through the
+same handshake. A create that does supply listeners is not created until every one has acked.
 
 ## 1. Listener object
 
@@ -94,8 +94,8 @@ loads unchanged and a session without listeners simply has no file.
 
 ## 2. Handshake: a listener is not registered until it answers
 
-Registration is a handshake, not fire-and-forget. A listener is not active, and a new session is
-not created, until the listener acknowledges a one-time token.
+Registration is a handshake, not fire-and-forget. A listener is not active until it acknowledges
+a one-time token, and a create that supplies listeners is not created until every one has acked.
 
 ### Test event
 
@@ -149,7 +149,7 @@ validated create/listen request. A handshake goes through:
 
 ### Create sequence
 
-1. Caller sends `POST /sessions` (or `hub run`) with at least one listener.
+1. Caller sends `POST /sessions` (or `hub run`), optionally with listeners.
 2. Hub validates (400 on a malformed listener, before any side effect).
 3. Hub writes one handshake per listener and sends every test event in parallel.
 4. Each listener acknowledges through the CLI or the HTTP route.
@@ -176,24 +176,22 @@ returns the same error. `hub listen` blocks by default; `--no-wait` returns the 
 Removing a listener (`DELETE /sessions/:id/listeners/:listenerId`, `hub listeners rm`) takes
 effect immediately and deletes its cursor.
 
-### Human-created sessions (desktop window)
+### Sessions with no listeners
 
-The desktop window is a first-class client, but the person at the keyboard is the listener. The
-window's New Session path (IPC `hub:create`) is therefore exempt from the mandatory-listener
-rule:
+A create with zero listeners is immediate and needs no handshake:
 
-- A session created by hand is created immediately with **zero listeners**. `listeners` is `[]`
-  on `GET /sessions/:id`, `hub listeners` prints an empty list and exits 0, and no handshake is
-  started. This is a valid state, never an error.
+- The session exists at once with **zero listeners**. `listeners` is `[]` on `GET /sessions/:id`,
+  `hub listeners` prints an empty list and exits 0, and no handshake is started. This is a valid
+  state, never an error.
 - It emits no network events while it has no listener, exactly as the core rule says.
 - The person (or an agent they tell the id to) can attach a listener later with
   `hub listen <id> …` or `POST /sessions/:id/listeners`; the same handshake rules apply.
-- A listener can also be added to a running human session from an agent; nothing else about the
-  session changes.
+- A listener can also be added to a running session from an agent; nothing else about the session
+  changes.
 
-Programmatic creates stay strict: an agent that sends `listeners: []` to `POST /sessions` or
-`hub run` gets 400. `hub run` is always programmatic, even when a person typed it; the human
-path is the window, not the CLI.
+This applies to the desktop window's New Session path (IPC `hub:create`) and to `POST /sessions`
+or `hub run` when `listeners` is missing or empty. `hub listen` still needs exactly one listener,
+and a create with several listeners still waits for all of them.
 
 ## 3. Event envelope and journal
 

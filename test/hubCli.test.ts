@@ -314,10 +314,14 @@ describe('hub listeners, ack and events', () => {
     expect(result.stderr).toMatch(/unknown event name/);
   });
 
-  it('refuses run with no listener: a session must not exist before one acks', async () => {
+  it('run --detach with no listener creates the session and prints the id', async () => {
+    started.length = 0;
+    listenBodies.length = 0;
     const result = await hub(['run', '--detach', '--', 'sleep', '30']);
-    expect(result.code).toBe(1);
-    expect(result.stderr).toMatch(/--listen/);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe(`${NEW}\n`);
+    expect(listenBodies).toHaveLength(0);
+    expect(started).toMatchObject([{ command: 'sleep', args: ['30'] }]);
   });
 
   it('listen adds exactly one listener to a resolved session', async () => {

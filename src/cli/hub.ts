@@ -14,7 +14,7 @@ const USAGE = `usage:
   hub run [--cwd DIR] [--title T] [--unattended] [-q] [--json] -- CMD ARGS…   start a session, follow it, exit with its exit code
   hub run --detach [--json] -- CMD ARGS…              start the session, print its id, exit 0 (never follows the output)
   hub run --wait [--timeout S] [--json] -- CMD ARGS…  start detached, then block like hub wait
-  hub run … --listen SPEC | --listen-file PATH        listeners are required; every one must ack before the session exists
+  hub run … --listen SPEC | --listen-file PATH        listeners are optional; every given one must ack before the session exists
   hub listen <session> --listen SPEC [--listen-file PATH] [--ack-timeout S] [--json] [--no-wait]
                                                       add a listener to a running session (same handshake)
   hub ack <handshake-id> <token> [--json]              acknowledge a pending listener handshake
@@ -47,10 +47,11 @@ const USAGE = `usage:
   hub answer <id> --keys '1\\r'                       write raw keys (\\r \\n \\t \\e escapes)
   hub --help                                          this text (also: hub with no arguments), exit 0
 
-listener SPEC (repeatable; at least one is required on run, and for listen):
+listener SPEC (repeatable; run may have none, listen needs one):
   omb:<botId>/<threadId>              deliver to an OpenMausBot bot thread (needs omb-bridge.json in the data dir)
   http:<url>                          POST each event as JSON
-  cmd:<argv0>[,<arg>…]                one JSON line on stdin, exit 0 = delivered; may print {"ack":"<token>"}
+  cmd:<argv0>[,<arg>…]                one JSON line on stdin; exit 0 = delivered and acknowledges the create handshake
+                                      (printing {"ack":"<token>"} on stdout is accepted too; a wrong token is refused)
   suffix #events=attention,turn,exit   event filter (default: all four)
   http extras: #header=Name:Value (repeatable), #bearer-env=VAR
   use --listen-file PATH for a JSON listener object when a secret must not land in shell history
@@ -383,7 +384,6 @@ function collectListeners(flags: Map<string, string | true>, repeated: Map<strin
     const fromFile = readListenFile(path);
     listeners.push(ackTimeoutSec === undefined ? fromFile : { ...fromFile, ackTimeoutSec });
   }
-  if (listeners.length === 0) throw new CliError(`at least one --listen or --listen-file is required\n\n${USAGE}`);
   return listeners;
 }
 
